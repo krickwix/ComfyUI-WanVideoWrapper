@@ -423,6 +423,7 @@ class WanVideoCausVidSampler:
         pbar = ProgressBar(num_blocks)
         
         for i,current_num_frames in enumerate(all_num_frames):
+            print("current_start_frame: ", current_start_frame)
             noisy_input = noise[:, current_start_frame - num_input_frames:current_start_frame + current_num_frames - num_input_frames]
 
             # Step 3.1: Spatial denoising loop
@@ -435,7 +436,7 @@ class WanVideoCausVidSampler:
                     dtype=torch.int64) * current_timestep
 
                 if step_index < len(timesteps) - 1:
-                    noise_pred, self.teacache_state = model_pred(
+                    flow_pred, self.teacache_state = model_pred(
                         noisy_input.to(dtype), 
                         text_embeds["prompt_embeds"], 
                         text_embeds["negative_prompt_embeds"], 
@@ -448,22 +449,23 @@ class WanVideoCausVidSampler:
                     #print("noise_pred shape: ", noise_pred.shape)                    
 
                     denoised_pred = convert_flow_pred_to_x0(
-                        flow_pred=noise_pred.transpose(0, 1),
+                        flow_pred=flow_pred.transpose(0, 1),
                         xt=noisy_input.transpose(0, 1),
                         timestep=timestep.flatten(0, 1)
                     )
                     
                     next_timestep = timesteps[step_index + 1]
+                    print("step_index: ", step_index, "next_timestep: ", next_timestep)
                     noisy_input = sample_scheduler.add_noise(
                         denoised_pred,
                         torch.randn_like(denoised_pred),
                         next_timestep * torch.ones(
-                            [1 * current_num_frames], device=noise.device, dtype=torch.long)
+                            [current_num_frames], device=noise.device, dtype=torch.long)
                     )
                     noisy_input = noisy_input.transpose(0, 1)
                 else:
                     # for getting real output
-                    noise_pred, self.teacache_state = model_pred(
+                    flow_pred, self.teacache_state = model_pred(
                         noisy_input.to(dtype), 
                         text_embeds["prompt_embeds"], 
                         text_embeds["negative_prompt_embeds"], 
@@ -474,7 +476,7 @@ class WanVideoCausVidSampler:
                         )
                     
                     denoised_pred = convert_flow_pred_to_x0(
-                        flow_pred=noise_pred.transpose(0, 1),
+                        flow_pred=flow_pred.transpose(0, 1),
                         xt=noisy_input.transpose(0, 1),
                         timestep=timestep.flatten(0, 1)
                     )
@@ -486,24 +488,26 @@ class WanVideoCausVidSampler:
             output_latents[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
 
             # Step 3.3: rerun with timestep zero to update KV cache using clean context
-            if step_index != len(all_num_frames) - 1:
-                context_timestep = torch.ones_like(timestep) * context_noise
-                noise_pred, self.teacache_state = model_pred(
-                    noisy_input.to(dtype), 
-                    text_embeds["prompt_embeds"], 
-                    text_embeds["negative_prompt_embeds"], 
-                    context_timestep, step_index, image_cond, clip_fea, 
-                    kv_cache=self.kv_cache1,
-                    crossattn_cache=self.crossattn_cache,
-                    current_start=current_start_frame * frame_seq_length
-                    )
+            
+            print("cleaning KV cache")
+            context_timestep = torch.ones_like(timestep) * context_noise
+            model_pred(
+                denoised_pred.to(dtype), 
+                text_embeds["prompt_embeds"], 
+                text_embeds["negative_prompt_embeds"], 
+                context_timestep, step_index, image_cond, clip_fea, 
+                kv_cache=self.kv_cache1,
+                crossattn_cache=self.crossattn_cache,
+                current_start=current_start_frame * frame_seq_length
+                )
 
             # Step 3.4: update the start and end frame indices
             current_start_frame += current_num_frames
 
 
             if callback is not None:
-                callback_latent = output_latents[:, :current_start_frame].float().detach().permute(1,0,2,3)
+                #callback_latent = output_latents[:, :current_start_frame].float().detach().permute(1,0,2,3)
+                callback_latent = denoised_pred.float().detach().permute(1,0,2,3)
                 callback(i, callback_latent, None, steps)
             else:
                 pbar.update(1)
@@ -517,6 +521,9 @@ class WanVideoCausVidSampler:
                 [0], dtype=torch.long, device=noise.device)
             self.kv_cache1[block_index]["local_end_index"] = torch.tensor(
                 [0], dtype=torch.long, device=noise.device)
+            
+        self.kv_cache1 = None
+        self.crossattn_cache = None
             
         if force_offload:
             if model["manual_offloading"]:
