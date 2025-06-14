@@ -553,6 +553,8 @@ class WanVideoModelLoader:
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
       
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
+        if "generator" in sd:
+            sd = sd["generator"]
 
         
         if "vace_blocks.0.after_proj.weight" in sd and not "patch_embedding.weight" in sd:

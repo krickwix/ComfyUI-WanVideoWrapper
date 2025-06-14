@@ -36,7 +36,7 @@ class WanVideoCausVidSampler:
                 "shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
-                "scheduler": (["flowmatch_causvid", "unipc", "unipc/beta", "euler", "euler/beta", "lcm", "lcm/beta"],
+                "scheduler": (["flowmatch_causvid", "flowmatch_causvid_warp", "unipc", "unipc/beta", "euler", "euler/beta", "lcm", "lcm/beta"],
                     {
                         "default": 'flowmatch_causvid'
                     }),
@@ -45,7 +45,7 @@ class WanVideoCausVidSampler:
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
                 "prefix_samples": ("LATENT", {"tooltip": "prefix latents"} ),
                 "denoise_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "rope_function": (["default", "comfy"], {"default": "comfy", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
+                "rope_function": (["default", "comfy"], {"default": "default", "tooltip": "Comfy's RoPE implementation doesn't use complex numbers and can thus be compiled, that should be a lot faster when using torch.compile"}),
                 "experimental_args": ("EXPERIMENTALARGS", ),
             }
         }
@@ -111,14 +111,23 @@ class WanVideoCausVidSampler:
             sample_scheduler = FlowMatchLCMScheduler(shift=shift, use_beta_sigmas=(scheduler == 'lcm/beta'))
             sample_scheduler.set_timesteps(steps, device=device)
         elif 'flowmatch_causvid' in scheduler:
-            denoising_list = [1000, 750, 500, 50]
-            #denoising_list = [1000, 757, 522, 0]
-            sample_scheduler = FlowMatchScheduler(num_inference_steps=steps, shift=shift, sigma_min=0, extra_one_step=True)
-            sample_scheduler.timesteps = torch.tensor(denoising_list).to(device)
-            sample_scheduler.sigmas = torch.cat([sample_scheduler.timesteps / 1000, torch.tensor([0.0], device=device)])
+            sample_scheduler = FlowMatchScheduler(
+                shift=shift, sigma_min=0.0, extra_one_step=True
+            )
+            sample_scheduler.set_timesteps(1000, training=True)
+            denoising_step_list = [1000, 750, 500, 250] #self-forcing
+            #denoising_step_list = [1000, 757, 522] #causvid original
+            denoising_step_list = torch.tensor(denoising_step_list, dtype=torch.long)
+            if "warp" in scheduler:            
+                timesteps = torch.cat((sample_scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
+                denoising_step_list = timesteps[1000 - denoising_step_list]
+            # sample_scheduler = FlowMatchScheduler(num_inference_steps=steps, shift=shift, sigma_min=0, extra_one_step=True)
+            # sample_scheduler.timesteps = torch.tensor(denoising_step_list).to(device)
+            # sample_scheduler.sigmas = torch.cat([sample_scheduler.timesteps / 1000, torch.tensor([0.0], device=device)])
             #print(sample_scheduler.sigmas)
+            
         
-        timesteps = sample_scheduler.timesteps
+        timesteps = denoising_step_list
         #timesteps = torch.tensor(denoising_list).to(device)
         print("timesteps", timesteps)
         
@@ -443,7 +452,6 @@ class WanVideoCausVidSampler:
                         xt=noisy_input.transpose(0, 1),
                         timestep=timestep.flatten(0, 1)
                     )
-                    #print("denoised_pred shape: ", denoised_pred.shape)
                     
                     next_timestep = timesteps[step_index + 1]
                     noisy_input = sample_scheduler.add_noise(
@@ -478,16 +486,17 @@ class WanVideoCausVidSampler:
             output_latents[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
 
             # Step 3.3: rerun with timestep zero to update KV cache using clean context
-            context_timestep = torch.ones_like(timestep) * context_noise
-            noise_pred, self.teacache_state = model_pred(
-                noisy_input.to(dtype), 
-                text_embeds["prompt_embeds"], 
-                text_embeds["negative_prompt_embeds"], 
-                context_timestep, step_index, image_cond, clip_fea, 
-                kv_cache=self.kv_cache1,
-                crossattn_cache=self.crossattn_cache,
-                current_start=current_start_frame * frame_seq_length
-                )
+            if step_index != len(all_num_frames) - 1:
+                context_timestep = torch.ones_like(timestep) * context_noise
+                noise_pred, self.teacache_state = model_pred(
+                    noisy_input.to(dtype), 
+                    text_embeds["prompt_embeds"], 
+                    text_embeds["negative_prompt_embeds"], 
+                    context_timestep, step_index, image_cond, clip_fea, 
+                    kv_cache=self.kv_cache1,
+                    crossattn_cache=self.crossattn_cache,
+                    current_start=current_start_frame * frame_seq_length
+                    )
 
             # Step 3.4: update the start and end frame indices
             current_start_frame += current_num_frames
