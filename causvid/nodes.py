@@ -36,10 +36,15 @@ class WanVideoCausVidSampler:
                 "shift": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 1000.0, "step": 0.01}),
                 "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
                 "force_offload": ("BOOLEAN", {"default": True, "tooltip": "Moves the model to the offload device after sampling"}),
-                "scheduler": (["flowmatch_causvid", "flowmatch_causvid_warp", "unipc", "unipc/beta", "euler", "euler/beta", "lcm", "lcm/beta"],
+                "scheduler": ([
+                    "flowmatch_causvid", "flowmatch_causvid_14b", "flowmatch_causvid_self_forcing",
+                    #"unipc", "unipc/beta", "euler", "euler/beta", "lcm", "lcm/beta"
+                    ],
                     {
                         "default": 'flowmatch_causvid'
                     }),
+                "kv_cache_device": (["main_device", "offload_device"], {"default": "offload_device", "tooltip": "Device to cache to"}),
+
             },
             "optional": {
                 "samples": ("LATENT", {"tooltip": "init Latents to use for video2video process"} ),
@@ -55,24 +60,23 @@ class WanVideoCausVidSampler:
     FUNCTION = "process"
     CATEGORY = "WanVideoWrapper"
 
-    def _initialize_kv_cache(self, batch_size, dtype, device, num_blocks=30):
+    def _initialize_kv_cache(self, batch_size, dtype, device, num_blocks=30, num_heads=12):
         """
         Initialize a Per-GPU KV cache for the Wan model.
         """
         kv_cache1 = []
-        kv_cache_size = 32760
 
         for _ in range(num_blocks):
             kv_cache1.append({
-                "k": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, kv_cache_size, 12, 128], dtype=dtype, device=device),
+                "k": torch.zeros([batch_size, self.cache_window_size, num_heads, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, self.cache_window_size, num_heads, 128], dtype=dtype, device=device),
                 "global_end_index": torch.tensor([0], dtype=torch.long, device=device),
                 "local_end_index": torch.tensor([0], dtype=torch.long, device=device)
             })
 
         self.kv_cache1 = kv_cache1  # always store the clean cache
 
-    def _initialize_crossattn_cache(self, batch_size, dtype, device, num_blocks=30):
+    def _initialize_crossattn_cache(self, batch_size, dtype, device, num_blocks=30, num_heads=12):
         """
         Initialize a Per-GPU cross-attention cache for the Wan model.
         """
@@ -80,14 +84,34 @@ class WanVideoCausVidSampler:
 
         for _ in range(num_blocks):
             crossattn_cache.append({
-                "k": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
-                "v": torch.zeros([batch_size, 512, 12, 128], dtype=dtype, device=device),
+                "k": torch.zeros([batch_size, 512, num_heads, 128], dtype=dtype, device=device),
+                "v": torch.zeros([batch_size, 512, num_heads, 128], dtype=dtype, device=device),
                 "is_init": False
             })
         self.crossattn_cache = crossattn_cache
     
+    def _shift_kv_cache(self):
+        """
+        Shift the KV cache left by shift_blocks * num_frame_per_block * frame_seq_length.
+        This is called when kv_start exceeds window_size.
+        The first block is preserved, and shifting starts from the second block.
+        """
+        shift_length = self.shift_blocks * self.num_frame_per_block * self.frame_seq_length
+        
+        for block in self.kv_cache1:            
+            block["k"] = torch.roll(block["k"], shifts=-shift_length, dims=1)
+            block["v"] = torch.roll(block["v"], shifts=-shift_length, dims=1)
+            
+            # Clear the shifted-out part (except the first block)
+            block["k"][:, -shift_length:] = 0
+            block["v"][:, -shift_length:] = 0
+        
+        # Update kv_start
+        self.kv_start -= shift_length
+        return shift_length
+    
 
-    def process(self, model, text_embeds, image_embeds, shift, steps, seed, scheduler,
+    def process(self, model, text_embeds, image_embeds, shift, steps, seed, scheduler, kv_cache_device,
         force_offload=True, samples=None, prefix_samples=None, denoise_strength=1.0, rope_function="default", 
         experimental_args=None):
         #assert not (context_options and teacache_args), "Context options cannot currently be used together with teacache."
@@ -97,6 +121,11 @@ class WanVideoCausVidSampler:
         dtype = model["dtype"]
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+
+        if kv_cache_device == "main_device":
+            cache_device = mm.get_torch_device()
+        else:
+            cache_device = mm.unet_offload_device()
         
         steps = int(steps/denoise_strength)
 
@@ -115,12 +144,14 @@ class WanVideoCausVidSampler:
                 shift=shift, sigma_min=0.0, extra_one_step=True
             )
             sample_scheduler.set_timesteps(1000, training=True)
-            denoising_step_list = [1000, 750, 500, 250] #self-forcing
-            #denoising_step_list = [1000, 757, 522] #causvid original
-            denoising_step_list = torch.tensor(denoising_step_list, dtype=torch.long)
-            if "warp" in scheduler:            
+            denoising_step_list = torch.tensor([1000, 757, 522], dtype=torch.long)
+          
+            if "warp" in scheduler or "self_forcing" in scheduler:
+                denoising_step_list = torch.tensor([1000, 750, 500, 250] , dtype=torch.long)
                 timesteps = torch.cat((sample_scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
                 denoising_step_list = timesteps[1000 - denoising_step_list]
+            elif "14b" in scheduler:
+                denoising_step_list = torch.tensor([1000, 934, 862, 756, 603, 410, 250, 140, 74], dtype=torch.long)
             # sample_scheduler = FlowMatchScheduler(num_inference_steps=steps, shift=shift, sigma_min=0, extra_one_step=True)
             # sample_scheduler.timesteps = torch.tensor(denoising_step_list).to(device)
             # sample_scheduler.sigmas = torch.cat([sample_scheduler.timesteps / 1000, torch.tensor([0.0], device=device)])
@@ -188,10 +219,7 @@ class WanVideoCausVidSampler:
         noise = noise.to(device, dtype)
         
         latent_video_length = noise.shape[1]  
-        seq_len = math.ceil((noise.shape[2] * noise.shape[3]) / 4 * noise.shape[1])
-
         
-               
         if samples is not None:
             input_samples = samples["samples"].squeeze(0).to(noise)
             if input_samples.shape[1] != noise.shape[1]:
@@ -238,15 +266,16 @@ class WanVideoCausVidSampler:
             ],
             dim=1)
 
+        seq_len = math.ceil((noise.shape[2] * noise.shape[3]) / 4 * noise.shape[1])
         log.info(f"Seq len: {seq_len}")
-           
-        pbar = ProgressBar(steps)
+        seq_len = latent_video_length * 1560
+        log.info(f"Seq len: {seq_len}")
 
         if args.preview_method in [LatentPreviewMethod.Auto, LatentPreviewMethod.Latent2RGB]: #default for latent2rgb
             from latent_preview import prepare_callback
         else:
             from ..latent_preview import prepare_callback #custom for tiny VAE previews
-        callback = prepare_callback(patcher, steps)
+        
 
         #blockswap init        
         transformer_options = patcher.model_options.get("transformer_options", None)
@@ -298,7 +327,7 @@ class WanVideoCausVidSampler:
 
         #region model pred
         def model_pred(z, positive_embeds, negative_embeds, timestep, idx, image_cond=None, clip_fea=None, 
-                             vace_data=None, unianim_data=None, teacache_state=None, kv_cache=None, crossattn_cache=None, current_start=0, cache_start=None):
+                             vace_data=None, unianim_data=None, teacache_state=None, kv_cache=None, crossattn_cache=None, current_kv_cache_start=0, kv_start=0, kv_end=0):
             with torch.autocast(device_type=mm.get_autocast_device(device), dtype=dtype, enabled=("fp8" in model["quantization"])):
 
                 nonlocal patcher
@@ -318,8 +347,9 @@ class WanVideoCausVidSampler:
                     'unianim_data': unianim_data,
                     'kv_cache': kv_cache,
                     'crossattn_cache': crossattn_cache,
-                    'current_start': current_start,
-                    'cache_start': cache_start
+                    'current_kv_cache_start': current_kv_cache_start,
+                    "kv_start": kv_start, 
+                    "kv_end": kv_end
                 }
 
                 #cond
@@ -381,14 +411,19 @@ class WanVideoCausVidSampler:
             pass
 
         #main loop
-        num_frame_per_block = 3
+        self.num_frame_per_block = 3
         num_frames = noise.shape[1]
-        assert num_frames % num_frame_per_block == 0
-        num_blocks = num_frames // num_frame_per_block
+        assert num_frames % self.num_frame_per_block == 0
+        num_blocks = num_frames // self.num_frame_per_block
         print("num_blocks: ", num_blocks)
         context_noise = 0
-        frame_seq_length = 1560
-        print("frame_seq_length: ", frame_seq_length)
+        self.frame_seq_length = 1560
+        print("frame_seq_length: ", self.frame_seq_length)
+
+        self.cache_window_size = self.frame_seq_length * num_frames
+        self.shift_blocks = 1
+        self.kv_start = 0
+        self.kv_end = 0
 
 
         output_latents = torch.zeros(
@@ -403,30 +438,40 @@ class WanVideoCausVidSampler:
         self._initialize_kv_cache(
             batch_size=1,
             dtype=noise.dtype,
-            device=noise.device
+            device=cache_device,
+            num_blocks=transformer.num_layers,
+            num_heads=transformer.num_heads,
         )
         self._initialize_crossattn_cache(
             batch_size=1,
             dtype=noise.dtype,
-            device=noise.device
+            device=cache_device,
+            num_blocks=transformer.num_layers,
+            num_heads=transformer.num_heads,
         )
                 
         # Step 2: Cache context feature
-        current_start_frame = 0
+        current_kv_cache_start_frame = 0
         num_input_frames = 0
         
 
         # Step 3: Temporal denoising loop
-        all_num_frames = [num_frame_per_block] * num_blocks
+        all_num_frames = [self.num_frame_per_block] * num_blocks
         print("all_num_frames", all_num_frames)
 
         pbar = ProgressBar(num_blocks)
+        callback = prepare_callback(patcher, num_blocks)
         
         for i,current_num_frames in enumerate(all_num_frames):
-            print("current_start_frame: ", current_start_frame)
-            noisy_input = noise[:, current_start_frame - num_input_frames:current_start_frame + current_num_frames - num_input_frames]
+            print("current_kv_cache_start_frame: ", current_kv_cache_start_frame)
+            #noisy_input = noise[:, current_kv_cache_start_frame - num_input_frames:current_kv_cache_start_frame + current_num_frames - num_input_frames]
+            noisy_input = noise[:, i * self.num_frame_per_block:(i + 1) * self.num_frame_per_block]
+            print("noisy_input shape: ", noisy_input.shape)
 
-            # Step 3.1: Spatial denoising loop
+            kv_end = self.kv_start + self.num_frame_per_block * self.frame_seq_length
+            print("kv_end: ", kv_end)
+
+            # Spatial denoising loop
             for step_index, current_timestep in enumerate(timesteps):
                 print(f"current_timestep: {current_timestep}")
                 # set current timestep
@@ -443,7 +488,9 @@ class WanVideoCausVidSampler:
                         timestep, step_index, image_cond, clip_fea, 
                         kv_cache=self.kv_cache1,
                         crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * frame_seq_length
+                        current_kv_cache_start=current_kv_cache_start_frame * self.frame_seq_length,
+                        kv_start = self.kv_start,
+                        kv_end = kv_end
                         )
                     
                     #print("noise_pred shape: ", noise_pred.shape)                    
@@ -472,7 +519,9 @@ class WanVideoCausVidSampler:
                         timestep, step_index, image_cond, clip_fea, 
                         kv_cache=self.kv_cache1,
                         crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * frame_seq_length
+                        current_kv_cache_start=current_kv_cache_start_frame * self.frame_seq_length,
+                        kv_start = self.kv_start,
+                        kv_end = kv_end
                         )
                     
                     denoised_pred = convert_flow_pred_to_x0(
@@ -485,7 +534,8 @@ class WanVideoCausVidSampler:
 
             # Step 3.2: record the model's output
             #print("denoised_pred shape before output: ", denoised_pred.shape)
-            output_latents[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
+            #output_latents[:, current_kv_cache_start_frame:current_kv_cache_start_frame + current_num_frames] = denoised_pred
+            output_latents[:, i * self.num_frame_per_block:(i + 1) * self.num_frame_per_block] = denoised_pred
 
             # Step 3.3: rerun with timestep zero to update KV cache using clean context
             
@@ -498,17 +548,30 @@ class WanVideoCausVidSampler:
                 context_timestep, step_index, image_cond, clip_fea, 
                 kv_cache=self.kv_cache1,
                 crossattn_cache=self.crossattn_cache,
-                current_start=current_start_frame * frame_seq_length
+                current_kv_cache_start=current_kv_cache_start_frame * self.frame_seq_length,
+                kv_start = self.kv_start,
+                kv_end = kv_end
                 )
+            
+            # Update positions for next block
+            r_shift_length = self.num_frame_per_block * self.frame_seq_length
+            self.kv_start += r_shift_length
+            kv_end += r_shift_length
+            #self.rope_start += r_shift_length
+            # Check if we need to shift the cache
+            
+            if kv_end > self.cache_window_size:
+                print("Shifting KV cache")
+                kv_end -= self._shift_kv_cache()
 
             # Step 3.4: update the start and end frame indices
-            current_start_frame += current_num_frames
+            current_kv_cache_start_frame += current_num_frames
 
 
             if callback is not None:
-                #callback_latent = output_latents[:, :current_start_frame].float().detach().permute(1,0,2,3)
+                #callback_latent = output_latents[:, :current_kv_cache_start_frame].float().detach().permute(1,0,2,3)
                 callback_latent = denoised_pred.float().detach().permute(1,0,2,3)
-                callback(i, callback_latent, None, steps)
+                callback(i, callback_latent, None, num_blocks)
             else:
                 pbar.update(1)
 

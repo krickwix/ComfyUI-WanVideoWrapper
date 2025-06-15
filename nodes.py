@@ -553,6 +553,8 @@ class WanVideoModelLoader:
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
       
         sd = load_torch_file(model_path, device=transformer_load_device, safe_load=True)
+        if "generator_ema" in sd:
+            sd = sd["generator_ema"]
         if "generator" in sd:
             sd = sd["generator"]
 

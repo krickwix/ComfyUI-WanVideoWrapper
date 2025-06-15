@@ -302,7 +302,7 @@ class WanSelfAttention(nn.Module):
     
     @torch.compiler.disable()
     def forward_kv_cache(self, x, seq_lens, grid_sizes, freqs, rope_func = "default", block_mask=None, 
-                         kv_cache=None, current_start=0, cache_start=None):
+                         kv_cache=None, current_kv_cache_start=0, kv_start=None, kv_end=None):
         r"""
         Args:
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
@@ -311,11 +311,6 @@ class WanSelfAttention(nn.Module):
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-
-        if cache_start is None:
-            cache_start = current_start
-
-        #print("current_start:", current_start, "cache_start:", cache_start)
 
         # query, key, value function
         def qkv_fn(x):
@@ -335,31 +330,46 @@ class WanSelfAttention(nn.Module):
         #     q=rope_apply(q, grid_sizes, freqs)
         #     k=rope_apply(k, grid_sizes, freqs)
 
-        frame_seqlen = math.prod(grid_sizes[0][1:]).item()
-        current_start_frame = current_start // frame_seqlen
-        roped_query = causal_rope_apply(
-            q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
-        roped_key = causal_rope_apply(
-            k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+        # if self_forcing:
+        #     frame_seqlen = math.prod(grid_sizes[0][1:]).item()
+        #     current_start_frame = current_kv_cache_start // frame_seqlen
+        #     roped_query = causal_rope_apply(
+        #         q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+        #     roped_key = causal_rope_apply(
+        #         k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
 
-        current_end = current_start + roped_query.shape[1]
-   
-        num_new_tokens = roped_query.shape[1]
-        
-        # Assign new keys/values directly up to current_end
-        local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
-        local_start_index = local_end_index - num_new_tokens
-        kv_cache["k"][:, local_start_index:local_end_index] = roped_key
-        kv_cache["v"][:, local_start_index:local_end_index] = v
+        #     current_end = current_kv_cache_start + roped_query.shape[1]
+    
+        #     num_new_tokens = roped_query.shape[1]
+            
+        #     # Assign new keys/values directly up to current_end
+        #     local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
+        #     local_start_index = local_end_index - num_new_tokens
+        #     kv_cache["k"][:, local_start_index:local_end_index] = roped_key
+        #     kv_cache["v"][:, local_start_index:local_end_index] = v
+            
+        #     x = attention(
+        #         roped_query.to(dtype=torch.bfloat16),
+        #         kv_cache["k"][:, max(0, local_end_index - self.max_attention_size):local_end_index].to(device=x.device, dtype=torch.bfloat16),
+        #         kv_cache["v"][:, max(0, local_end_index - self.max_attention_size):local_end_index].to(device=x.device, dtype=torch.bfloat16),
+        #         attention_mode=self.attention_mode
+        #     ).to(v.dtype)
+        #     kv_cache["global_end_index"].fill_(current_end)
+        #     kv_cache["local_end_index"].fill_(local_end_index)
+        #elif causal_plus:
+        roped_query = causal_rope_apply(
+            q, grid_sizes, freqs, start_frame=kv_start // math.prod(grid_sizes[0][1:]).item()).type_as(v)
+        roped_key = causal_rope_apply(
+            k, grid_sizes, freqs, start_frame=kv_start // math.prod(grid_sizes[0][1:]).item()).type_as(v)
+
+        kv_cache["k"][:, kv_start:kv_end] = roped_key
+        kv_cache["v"][:, kv_start:kv_end] = v
 
         x = attention(
-            roped_query.to(dtype=torch.float16),
-            kv_cache["k"][:, max(0, local_end_index - self.max_attention_size):local_end_index].to(dtype=torch.float16),
-            kv_cache["v"][:, max(0, local_end_index - self.max_attention_size):local_end_index].to(dtype=torch.float16),
-            attention_mode=self.attention_mode
-        ).to(v.dtype)
-        kv_cache["global_end_index"].fill_(current_end)
-        kv_cache["local_end_index"].fill_(local_end_index)
+            roped_query.to(device=x.device, dtype=torch.bfloat16), 
+            kv_cache["k"][:, :kv_end].to(device=x.device, dtype=torch.bfloat16), 
+            kv_cache["v"][:, :kv_end].to(device=x.device, dtype=torch.bfloat16), 
+            attention_mode=self.attention_mode).to(v.dtype)
 
         # output
         x = x.flatten(2)
@@ -676,8 +686,8 @@ class WanAttentionBlock(nn.Module):
         block_mask=None,
         kv_cache=None,
         crossattn_cache=None,
-        current_start=0,
-        cache_start=None
+        current_kv_cache_start=0,
+        kv_start=None, kv_end=None
         
     ):
         r"""
@@ -720,8 +730,8 @@ class WanAttentionBlock(nn.Module):
                 freqs, rope_func=rope_func,
                 block_mask=block_mask,
                 kv_cache=kv_cache,
-                current_start=current_start,
-                cache_start=cache_start
+                current_kv_cache_start=current_kv_cache_start,
+                kv_start=kv_start, kv_end=kv_end
             )
             x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
 
@@ -1324,8 +1334,8 @@ class WanModel(ModelMixin, ConfigMixin):
         attn_cond=None,
         kv_cache: dict = None,
         crossattn_cache: dict = None,
-        current_start: int = 0,
-        cache_start = None
+        current_kv_cache_start: int = 0,
+        kv_start=None, kv_end=None
         
     ):
         r"""
@@ -1424,9 +1434,9 @@ class WanModel(ModelMixin, ConfigMixin):
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         assert seq_lens.max() <= seq_len
 
-        if kv_cache is not None: #causal
+        if kv_cache is not None: #causal  torch.Size([1, 4680, 5120])
             x = torch.cat(x)
-        else:
+        else: #torch.Size([1, 32760, 5120])
             x = torch.cat([            
                 torch.cat([u, u.new_zeros(1, seq_len - u.size(1), u.size(2))],
                         dim=1) for u in x
@@ -1646,8 +1656,9 @@ class WanModel(ModelMixin, ConfigMixin):
                         {
                             "kv_cache": kv_cache[b],
                             "crossattn_cache": crossattn_cache[b],
-                            "current_start": current_start,
-                            "cache_start": cache_start
+                            "current_kv_cache_start": current_kv_cache_start,
+                            "kv_start": kv_start,
+                            "kv_end": kv_end
                         }
                     )
                 #skip layer guidance

@@ -516,4 +516,6 @@ class T5EncoderModel:
         mask = mask.to(device)
         seq_lens = mask.gt(0).sum(dim=1).long()
         context = self.model(ids, mask)
+        for u, v in zip(context, seq_lens):
+            u[v:] = 0.0  # set padding to 0.0
         return [u[:v] for u, v in zip(context, seq_lens)]

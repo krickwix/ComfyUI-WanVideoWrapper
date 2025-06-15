@@ -84,7 +84,7 @@ def get_previewer(device, latent_format):
             taew_sd = comfy.utils.load_torch_file(taehv_path)
             taesd = TAEHV(taew_sd).to(device)
             previewer = TAESDPreviewerImpl(taesd)
-            previewer = WrappedPreviewer(previewer, rate=16)
+            previewer = WrappedPreviewer(previewer, rate=3)
 
         if previewer is None:
             if latent_format.latent_rgb_factors is not None:
@@ -164,17 +164,19 @@ class WrappedPreviewer(LatentPreviewer):
         self.c_index = (self.c_index + num_previews) % num_images
         return None
     def process_previews(self, image_tensor, ind, leng):
-        max_size = 256
+        max_size = 512
         image_tensor = self.decode_latent_to_preview(image_tensor)
         if image_tensor.size(1) > max_size or image_tensor.size(2) > max_size:
             image_tensor = image_tensor.movedim(-1,0)
             if image_tensor.size(2) < image_tensor.size(3):
                 height = (max_size * image_tensor.size(2)) // image_tensor.size(3)
-                image_tensor = F.interpolate(image_tensor, (height,max_size), mode='bilinear')
+                image_tensor = F.interpolate(image_tensor, (height,max_size), mode='bicubic')
             else:
                 width = (max_size * image_tensor.size(3)) // image_tensor.size(2)
-                image_tensor = F.interpolate(image_tensor, (max_size, width), mode='bilinear')
+                image_tensor = F.interpolate(image_tensor, (max_size, width), mode='bicubic')
             image_tensor = image_tensor.movedim(0,-1)
+        #image_tensor = image_tensor.repeat_interleave(2, dim=0)
+
         previews_ubyte = (image_tensor.clamp(0, 1)
                          .mul(0xFF)  # to 0..255
                          ).to(device="cpu", dtype=torch.uint8)
@@ -189,10 +191,10 @@ class WrappedPreviewer(LatentPreviewer):
             #NOTE: send sync already uses call_soon_threadsafe
             serv.send_sync(server.BinaryEventTypes.PREVIEW_IMAGE,
                            message.getvalue(), serv.client_id)
-            if self.rate == 16:
-                ind = (ind + 1) % ((leng-1) * 4 - 1)
-            else:
-                ind = (ind + 1) % leng
+            #if self.rate == 16:
+            ind = (ind + 1) % ((leng-1) * 4 - 1)
+            #else:
+            #    ind = (ind + 1) % leng
 
         # Send SwarmUI preview if detected
         if self.swarmui_env:
