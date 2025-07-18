@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: comfyui
+    app.kubernetes.io/instance: comfyui
+    app.kubernetes.io/name: comfyui
+  name: comfyui
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: comfyui
+      app.kubernetes.io/instance: comfyui
+      app.kubernetes.io/name: comfyui
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: comfyui
+        app.kubernetes.io/instance: comfyui
+        app.kubernetes.io/name: comfyui
+    spec:
+      containers:
+      - env:
+        - name: USER_ID
+          valueFrom:
+            configMapKeyRef:
+              key: USER_ID
+              name: comfyui-config
+        - name: GROUP_ID
+          valueFrom:
+            configMapKeyRef:
+              key: GROUP_ID
+              name: comfyui-config
+        - name: COMFYUI_PORT
+          valueFrom:
+            configMapKeyRef:
+              key: COMFYUI_PORT
+              name: comfyui-config
+        image: krickwix/comfyui:latest
+        imagePullPolicy: Always
+        name: comfyui
+        ports:
+        - containerPort: 8188
+          name: http
+          protocol: TCP
+        resources:
+          limits:
+            nvidia.com/gpu: "8"
+          requests:
+            nvidia.com/gpu: "8"
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /opt/comfyui/models
+          name: models-volume
+        - mountPath: /opt/comfyui/custom_nodes/ComfyUI-WanVideoWrapper
+          name: custom-nodes-volume
+          subPath: ComfyUI-WanVideoWrapper
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - effect: NoSchedule
+        key: ray.io/is-ray-node
+        operator: Equal
+        value: "yes"
+      volumes:
+      - name: models-volume
+        persistentVolumeClaim:
+          claimName: comfyui-models-pvc
+      - name: custom-nodes-volume
+        hostPath:
+          path: /home/ubuntu/ComfyUI-WanVideoWrapper
+          type: Directory 
