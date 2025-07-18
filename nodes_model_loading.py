@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import os, gc
 from .utils import log, apply_lora
 import numpy as np
