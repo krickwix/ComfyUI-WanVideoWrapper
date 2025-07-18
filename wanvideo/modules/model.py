@@ -28,12 +28,16 @@ except:
 # rope_apply, rope_params, apply_rope_comfy_chunked are defined in this file
 # TeaCacheState, MagCacheState, EasyCacheState are in cache_methods
 from ...cache_methods.cache_methods import TeaCacheState, MagCacheState, EasyCacheState
-# get_module_memory_mb, get_autocast_device, get_torch_device, relative_l1_distance are in utils.py
-from ...utils import get_module_memory_mb, get_autocast_device, get_torch_device, relative_l1_distance
+# get_module_memory_mb is in utils.py
+from ...utils import get_module_memory_mb
 
 import logging
 import comfy.model_management as mm
 log = logging.getLogger(__name__)
+
+def relative_l1_distance(x, y):
+    """Calculate relative L1 distance between two tensors"""
+    return (x - y).abs().mean() / x.abs().mean()
 
 def get_available_gpus():
     """Get list of available GPU devices."""
