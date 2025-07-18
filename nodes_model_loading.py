@@ -1382,7 +1382,41 @@ class WanVideoMultiGPULoader:
             # Apply the parallelism strategy
             if parallelism_type == "data_parallel":
                 log.info("Applying DataParallel to WanVideo model")
-                patcher.model.diffusion_model = nn.DataParallel(transformer, device_ids=gpu_id_list)
+                try:
+                    # Set NCCL environment variables for better stability
+                    import os
+                    os.environ['NCCL_DEBUG'] = 'WARN'
+                    os.environ['NCCL_TIMEOUT'] = '1800'
+                    os.environ['NCCL_IB_DISABLE'] = '1'
+                    os.environ['NCCL_P2P_DISABLE'] = '1'
+                    
+                    # Check GPU memory and compatibility
+                    log.info("Checking GPU compatibility for DataParallel...")
+                    for gpu_id in gpu_id_list:
+                        memory_info = torch.cuda.get_device_properties(gpu_id)
+                        log.info(f"GPU {gpu_id}: {memory_info.name}, Memory: {memory_info.total_memory / 1024**3:.1f}GB")
+                    
+                    # Ensure all GPUs are accessible
+                    for gpu_id in gpu_id_list:
+                        test_tensor = torch.zeros(1).to(f'cuda:{gpu_id}')
+                        del test_tensor
+                    
+                    # Apply DataParallel with error handling
+                    patcher.model.diffusion_model = nn.DataParallel(transformer, device_ids=gpu_id_list)
+                    log.info(f"DataParallel successfully applied on GPUs: {gpu_id_list}")
+                    
+                except Exception as e:
+                    log.warning(f"DataParallel failed with error: {e}")
+                    log.info("Falling back to block distribution or single GPU")
+                    
+                    if len(gpu_id_list) > 1 and enable_block_distribution:
+                        log.info("Applying block distribution as fallback")
+                        from .wanvideo.modules.model import distribute_model_blocks
+                        distribute_model_blocks(transformer, gpu_id_list)
+                    else:
+                        log.info("Using single GPU fallback")
+                        transformer.to(f'cuda:{gpu_id_list[0]}')
+                        patcher.model.diffusion_model = transformer
             
             elif parallelism_type == "block_distribution" and enable_block_distribution:
                 log.info("Applying block distribution across GPUs")
@@ -1393,6 +1427,25 @@ class WanVideoMultiGPULoader:
                 log.info("DistributedDataParallel setup - requires proper DDP initialization")
                 # Note: Full DDP setup requires torch.distributed.init_process_group
                 # This is a placeholder for the actual implementation
+                
+            elif parallelism_type == "manual_parallel":
+                log.info("Applying manual multi-GPU parallelism (no NCCL)")
+                # This approach manually distributes model components without DataParallel
+                if len(gpu_id_list) > 1:
+                    # Keep the main model on first GPU
+                    transformer.to(f'cuda:{gpu_id_list[0]}')
+                    
+                    # If model has block distribution capability, use it
+                    if enable_block_distribution and hasattr(transformer, 'blocks'):
+                        log.info("Distributing model blocks across GPUs manually")
+                        from .wanvideo.modules.model import distribute_model_blocks
+                        distribute_model_blocks(transformer, gpu_id_list)
+                    
+                    patcher.model.diffusion_model = transformer
+                    log.info(f"Manual parallelism applied across GPUs: {gpu_id_list}")
+                else:
+                    transformer.to(f'cuda:{gpu_id_list[0]}')
+                    patcher.model.diffusion_model = transformer
             
             log.info(f"Multi-GPU parallelism applied: {parallelism_type} on GPUs {gpu_id_list}")
         
