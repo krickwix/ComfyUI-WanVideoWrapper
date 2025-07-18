@@ -26,6 +26,10 @@ from comfy.cli_args import args, LatentPreviewMethod
 
 script_directory = os.path.dirname(os.path.abspath(__file__))
 
+def get_actual_model(model):
+    """Get the actual model, handling DataParallel wrapper"""
+    return model.module if hasattr(model, 'module') else model
+
 device = mm.get_torch_device()
 offload_device = mm.unet_offload_device()
 
@@ -1238,7 +1242,8 @@ class WanVideoSampler:
 
             control_embeds = image_embeds.get("control_embeds", None)
             if control_embeds is not None:
-                if transformer.in_dim not in [48, 32]:
+                actual_transformer = get_actual_model(transformer)
+                if actual_transformer.in_dim not in [48, 32]:
                     raise ValueError("Control signal only works with Fun-Control model")
                 control_latents = control_embeds.get("control_images", None)
                 control_camera_latents = control_embeds.get("control_camera_latents", None)
@@ -1325,7 +1330,8 @@ class WanVideoSampler:
                         patcher = apply_lora(patcher, device, device, low_mem_load=False)
                         patcher.model.is_patched = True
                 else:
-                    if transformer.in_dim not in [48, 32]:
+                    actual_transformer = get_actual_model(transformer)
+                    if actual_transformer.in_dim not in [48, 32]:
                         raise ValueError("Control signal only works with Fun-Control model")
                     image_cond = torch.zeros_like(noise).to(device) #fun control
                     clip_fea = None
@@ -1333,7 +1339,8 @@ class WanVideoSampler:
                 control_start_percent = control_embeds.get("start_percent", 0.0)
                 control_end_percent = control_embeds.get("end_percent", 1.0)
             else:
-                if transformer.in_dim == 36: #fun inp
+                actual_transformer = get_actual_model(transformer)
+                if actual_transformer.in_dim == 36: #fun inp
                     mask_latents = torch.tile(
                         torch.zeros_like(noise[:1]), [4, 1, 1, 1]
                     )
