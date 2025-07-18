@@ -1171,7 +1171,8 @@ class WanVideoSampler:
 
         # Scheduler
         if scheduler != "multitalk":
-            sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
+            actual_transformer = get_actual_model(transformer)
+            sample_scheduler, timesteps = get_scheduler(scheduler, steps, shift, device, actual_transformer.dim, flowedit_args, denoise_strength, sigmas=sigmas)
         else:
             timesteps = torch.tensor([1000, 750, 500, 250], device=device)
 
@@ -1378,10 +1379,11 @@ class WanVideoSampler:
         
         # UniAnimate
         if unianimate_poses is not None:
-            transformer.dwpose_embedding.to(device, model["dtype"])
+            actual_transformer = get_actual_model(transformer)
+            actual_transformer.dwpose_embedding.to(device, model["dtype"])
             dwpose_data = unianimate_poses["pose"].to(device, model["dtype"])
             dwpose_data = torch.cat([dwpose_data[:,:,:1].repeat(1,1,3,1,1), dwpose_data], dim=2)
-            dwpose_data = transformer.dwpose_embedding(dwpose_data)
+            dwpose_data = actual_transformer.dwpose_embedding(dwpose_data)
             log.info(f"UniAnimate pose embed shape: {dwpose_data.shape}")
             if dwpose_data.shape[2] > latent_video_length:
                 log.warning(f"UniAnimate pose embed length {dwpose_data.shape[2]} is longer than the video length {latent_video_length}, truncating")
@@ -1395,10 +1397,10 @@ class WanVideoSampler:
             
             random_ref_dwpose_data = None
             if image_cond is not None:
-                transformer.randomref_embedding_pose.to(device)
+                actual_transformer.randomref_embedding_pose.to(device)
                 random_ref_dwpose = unianimate_poses.get("ref", None)
                 if random_ref_dwpose is not None:
-                    random_ref_dwpose_data = transformer.randomref_embedding_pose(
+                    random_ref_dwpose_data = actual_transformer.randomref_embedding_pose(
                         random_ref_dwpose.to(device)
                         ).unsqueeze(2).to(model["dtype"]) # [1, 20, 104, 60]
                 
@@ -1542,7 +1544,8 @@ class WanVideoSampler:
         #uni3c
         pcd_data = pcd_data_input = None
         if uni3c_embeds is not None:
-            transformer.controlnet = uni3c_embeds["controlnet"]
+            actual_transformer = get_actual_model(transformer)
+            actual_transformer.controlnet = uni3c_embeds["controlnet"]
             pcd_data = {
                 "render_latent": uni3c_embeds["render_latent"].to(dtype),
                 "render_mask": uni3c_embeds["render_mask"],
@@ -1569,13 +1572,14 @@ class WanVideoSampler:
         #region transformer settings
         #rope
         freqs = None
-        transformer.rope_embedder.k = None
-        transformer.rope_embedder.num_frames = None
+        actual_transformer = get_actual_model(transformer)
+        actual_transformer.rope_embedder.k = None
+        actual_transformer.rope_embedder.num_frames = None
         if "comfy" in rope_function:
-            transformer.rope_embedder.k = riflex_freq_index
-            transformer.rope_embedder.num_frames = latent_video_length
+            actual_transformer.rope_embedder.k = riflex_freq_index
+            actual_transformer.rope_embedder.num_frames = latent_video_length
         else:
-            d = transformer.dim // transformer.num_heads
+            d = actual_transformer.dim // actual_transformer.num_heads
             freqs = torch.cat([
                 rope_params(1024, d - 4 * (d // 6), L_test=latent_video_length, k=riflex_freq_index),
                 rope_params(1024, 2 * (d // 6)),
