@@ -1390,6 +1390,21 @@ class WanVideoMultiGPULoader:
                     os.environ['NCCL_IB_DISABLE'] = '1'
                     os.environ['NCCL_P2P_DISABLE'] = '1'
                     
+                    # Fix shared memory issues in containers
+                    os.environ['NCCL_SHM_DISABLE'] = '1'  # Disable shared memory usage
+                    os.environ['NCCL_SOCKET_NTHREADS'] = '1'  # Reduce socket threads
+                    os.environ['NCCL_NSOCKS_PERTHREAD'] = '1'  # Reduce sockets per thread
+                    
+                    # Check available shared memory
+                    try:
+                        import subprocess
+                        shm_output = subprocess.check_output(['df', '/dev/shm'], text=True)
+                        log.info(f"Shared memory status:\n{shm_output}")
+                    except Exception as e:
+                        log.warning(f"Could not check shared memory: {e}")
+                        # Force disable shared memory if we can't check it
+                        os.environ['NCCL_SHM_DISABLE'] = '1'
+                    
                     # Check GPU memory and compatibility
                     log.info("Checking GPU compatibility for DataParallel...")
                     for gpu_id in gpu_id_list:
@@ -1407,16 +1422,35 @@ class WanVideoMultiGPULoader:
                     
                 except Exception as e:
                     log.warning(f"DataParallel failed with error: {e}")
-                    log.info("Falling back to block distribution or single GPU")
                     
-                    if len(gpu_id_list) > 1 and enable_block_distribution:
-                        log.info("Applying block distribution as fallback")
-                        from .wanvideo.modules.model import distribute_model_blocks
-                        distribute_model_blocks(transformer, gpu_id_list)
+                    # Check if it's a shared memory issue
+                    if "No space left on device" in str(e) or "shm" in str(e).lower():
+                        log.error("Detected shared memory issues in container environment")
+                        log.info("Consider running container with --shm-size=8g or larger")
+                        log.info("Falling back to manual parallelism without NCCL")
+                        
+                        # Use manual parallelism as fallback for shm issues
+                        if len(gpu_id_list) > 1:
+                            transformer.to(f'cuda:{gpu_id_list[0]}')
+                            if enable_block_distribution and hasattr(transformer, 'blocks'):
+                                log.info("Applying block distribution manually (no NCCL)")
+                                from .wanvideo.modules.model import distribute_model_blocks
+                                distribute_model_blocks(transformer, gpu_id_list)
+                            patcher.model.diffusion_model = transformer
+                        else:
+                            transformer.to(f'cuda:{gpu_id_list[0]}')
+                            patcher.model.diffusion_model = transformer
                     else:
-                        log.info("Using single GPU fallback")
-                        transformer.to(f'cuda:{gpu_id_list[0]}')
-                        patcher.model.diffusion_model = transformer
+                        log.info("Falling back to block distribution or single GPU")
+                        
+                        if len(gpu_id_list) > 1 and enable_block_distribution:
+                            log.info("Applying block distribution as fallback")
+                            from .wanvideo.modules.model import distribute_model_blocks
+                            distribute_model_blocks(transformer, gpu_id_list)
+                        else:
+                            log.info("Using single GPU fallback")
+                            transformer.to(f'cuda:{gpu_id_list[0]}')
+                            patcher.model.diffusion_model = transformer
             
             elif parallelism_type == "block_distribution" and enable_block_distribution:
                 log.info("Applying block distribution across GPUs")
