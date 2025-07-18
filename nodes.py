@@ -1586,11 +1586,11 @@ class WanVideoSampler:
                 rope_params(1024, 2 * (d // 6))
             ],
             dim=1)
-        transformer.rope_func = rope_function
-        for block in transformer.blocks:
+        actual_transformer.rope_func = rope_function
+        for block in actual_transformer.blocks:
             block.rope_func = rope_function
-        if transformer.vace_layers is not None:
-            for block in transformer.vace_blocks:
+        if actual_transformer.vace_layers is not None:
+            for block in actual_transformer.vace_blocks:
                 block.rope_func = rope_function
 
         #blockswap init        
@@ -1598,34 +1598,34 @@ class WanVideoSampler:
             block_swap_args = transformer_options.get("block_swap_args", None)
 
         if block_swap_args is not None:
-            transformer.use_non_blocking = block_swap_args.get("use_non_blocking", True)
-            for name, param in transformer.named_parameters():
+            actual_transformer.use_non_blocking = block_swap_args.get("use_non_blocking", True)
+            for name, param in actual_transformer.named_parameters():
                 if "block" not in name:
                     param.data = param.data.to(device)
                 if "control_adapter" in name:
                     param.data = param.data.to(device)
                 elif block_swap_args["offload_txt_emb"] and "txt_emb" in name:
-                    param.data = param.data.to(offload_device, non_blocking=transformer.use_non_blocking)
+                    param.data = param.data.to(offload_device, non_blocking=actual_transformer.use_non_blocking)
                 elif block_swap_args["offload_img_emb"] and "img_emb" in name:
-                    param.data = param.data.to(offload_device, non_blocking=transformer.use_non_blocking)
+                    param.data = param.data.to(offload_device, non_blocking=actual_transformer.use_non_blocking)
 
-            transformer.block_swap(
+            actual_transformer.block_swap(
                 block_swap_args["blocks_to_swap"] - 1 ,
                 block_swap_args["offload_txt_emb"],
                 block_swap_args["offload_img_emb"],
                 vace_blocks_to_swap = block_swap_args.get("vace_blocks_to_swap", None),
             )
         elif model["auto_cpu_offload"]:
-            for module in transformer.modules():
+            for module in actual_transformer.modules():
                 if hasattr(module, "offload"):
                     module.offload()
                 if hasattr(module, "onload"):
                     module.onload()
         elif model["manual_offloading"]:
-            transformer.to(device)
+            actual_transformer.to(device)
 
         # Initialize Cache if enabled
-        transformer.enable_teacache = transformer.enable_magcache = transformer.enable_easycache = False
+        actual_transformer.enable_teacache = actual_transformer.enable_magcache = actual_transformer.enable_easycache = False
         cache_args = teacache_args if teacache_args is not None else cache_args #for backward compatibility on old workflows
         if cache_args is not None:            
            from .cache_methods.cache_methods import set_transformer_cache_method
@@ -1642,14 +1642,14 @@ class WanVideoSampler:
         # Skip layer guidance (SLG)
         if slg_args is not None:
             assert batched_cfg is not None, "Batched cfg is not supported with SLG"
-            transformer.slg_blocks = slg_args["blocks"]
-            transformer.slg_start_percent = slg_args["start_percent"]
-            transformer.slg_end_percent = slg_args["end_percent"]
+            actual_transformer.slg_blocks = slg_args["blocks"]
+            actual_transformer.slg_start_percent = slg_args["start_percent"]
+            actual_transformer.slg_end_percent = slg_args["end_percent"]
         else:
-            transformer.slg_blocks = None
+            actual_transformer.slg_blocks = None
 
         # Radial attention setup
-        if transformer.attention_mode == "radial_sage_attention":
+        if actual_transformer.attention_mode == "radial_sage_attention":
             if latent.shape[2] % 16 != 0 or latent.shape[3] % 16 != 0:
                 raise Exception(f"Radial attention mode only supports image size divisible by 128.")
             
@@ -1662,7 +1662,8 @@ class WanVideoSampler:
                 raise Exception("Radial attention mode is enabled, but no parameters are provided. Add the `WanVideoSetRadialAttention` node to the model to set the parameters.")
 
             from .wanvideo.radial_attention.attn_mask import MaskMap
-            for i, block in enumerate(transformer.blocks):
+            actual_transformer = get_actual_model(transformer)
+            for i, block in enumerate(actual_transformer.blocks):
                 block.self_attn.mask_map = block.dense_attention_mode = block.dense_timesteps = block.self_attn.decay_factor = None
                 block.dense_block = True if i < dense_blocks else False
                 block.self_attn.mask_map = MaskMap(video_token_num=seq_len, num_frame=latent_video_length)
