@@ -127,6 +127,22 @@ def distribute_model_blocks(model, gpu_ids):
                 block.to(f'cuda:{target_gpu}')
                 log.debug(f"Moved VACE block {i} to GPU {target_gpu}")
 
+def apply_rope_comfy(xq, xk, freqs_cis):
+    """Apply RoPE (Rotary Position Embedding) to query and key tensors"""
+    seq_dim = 1
+    
+    # Apply rotation to xq
+    xq_chunk = xq.to(dtype=freqs_cis.dtype).reshape(*xq.shape[:-1], -1, 1, 2)
+    xq_out = (freqs_cis[..., 0] * xq_chunk[..., 0] + 
+              freqs_cis[..., 1] * xq_chunk[..., 1]).reshape(*xq.shape).type_as(xq)
+    
+    # Apply rotation to xk
+    xk_chunk = xk.to(dtype=freqs_cis.dtype).reshape(*xk.shape[:-1], -1, 1, 2)
+    xk_out = (freqs_cis[..., 0] * xk_chunk[..., 0] + 
+              freqs_cis[..., 1] * xk_chunk[..., 1]).reshape(*xk.shape).type_as(xk)
+    
+    return xq_out, xk_out
+
 def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
     seq_dim = 1
     
