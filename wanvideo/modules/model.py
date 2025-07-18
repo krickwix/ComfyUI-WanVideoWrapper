@@ -16,23 +16,111 @@ except:
     BlockMask = create_block_mask = flex_attention = None
     pass
 try:
-    from ..radial_attention.attn_mask import RadialSpargeSageAttn, RadialSpargeSageAttnDense
+    from ..radial_attention.attn_mask import RadialSpargeSageAttention
+    radial_sage_attention = RadialSpargeSageAttention
 except:
+    radial_sage_attention = None
     pass
 
-from .attention import attention
-import numpy as np
-__all__ = ['WanModel']
+from .wan_attention import WanSelfAttention, WanT2VCrossAttention, WanI2VCrossAttention
+from .wan_attention_block import WanAttentionBlock, VaceWanAttentionBlock, BaseWanAttentionBlock
+from .wan_head import Head
+from .wan_mlp_proj import MLPProj
+from .wan_rope import rope_apply, rope_params, apply_rope_comfy_chunked
+from .wan_cache import TeaCache, MagCache, EasyCache
+from .wan_utils import get_module_memory_mb, get_autocast_device, get_torch_device
+from .wan_utils import relative_l1_distance
 
-from tqdm import tqdm
-import gc
-import comfy.model_management as mm
-from ...utils import log, get_module_memory_mb
-from ...cache_methods.cache_methods import TeaCacheState, MagCacheState, EasyCacheState, relative_l1_distance
+import logging
+log = logging.getLogger(__name__)
 
-from ...multitalk.multitalk import get_attn_map_with_target
+def get_available_gpus():
+    """Get list of available GPU devices."""
+    if not torch.cuda.is_available():
+        return []
+    return list(range(torch.cuda.device_count()))
 
-from comfy.ldm.flux.math import apply_rope as apply_rope_comfy
+def setup_multi_gpu_parallelism(model, parallelism_type="data_parallel", gpu_ids=None):
+    """
+    Setup multi-GPU parallelism for the model.
+    
+    Args:
+        model: The model to parallelize
+        parallelism_type: Type of parallelism ('data_parallel', 'distributed', 'block_distribution')
+        gpu_ids: List of GPU IDs to use (None for all available)
+    
+    Returns:
+        The parallelized model
+    """
+    available_gpus = get_available_gpus()
+    if not available_gpus:
+        log.warning("No CUDA devices available for parallelism")
+        return model
+    
+    if gpu_ids is None:
+        gpu_ids = available_gpus
+    else:
+        # Validate GPU IDs
+        gpu_ids = [gpu_id for gpu_id in gpu_ids if gpu_id in available_gpus]
+        if not gpu_ids:
+            log.warning("No valid GPU IDs provided, using all available GPUs")
+            gpu_ids = available_gpus
+    
+    log.info(f"Setting up {parallelism_type} parallelism on GPUs: {gpu_ids}")
+    
+    if parallelism_type == "data_parallel":
+        # Use DataParallel for simple multi-GPU training
+        if len(gpu_ids) > 1:
+            model = nn.DataParallel(model, device_ids=gpu_ids)
+            log.info(f"Applied DataParallel on {len(gpu_ids)} GPUs")
+    
+    elif parallelism_type == "distributed":
+        # Use DistributedDataParallel for distributed training
+        if len(gpu_ids) > 1:
+            # Note: This requires proper DDP initialization with torch.distributed
+            log.info("DistributedDataParallel requires proper DDP initialization")
+            # model = nn.parallel.DistributedDataParallel(model, device_ids=gpu_ids)
+    
+    elif parallelism_type == "block_distribution":
+        # Custom block distribution across GPUs
+        distribute_model_blocks(model, gpu_ids)
+    
+    return model
+
+def distribute_model_blocks(model, gpu_ids):
+    """
+    Distribute model blocks across multiple GPUs.
+    
+    Args:
+        model: The model to distribute
+        gpu_ids: List of GPU IDs to distribute across
+    """
+    if not hasattr(model, 'blocks') or not model.blocks:
+        log.warning("Model has no blocks to distribute")
+        return
+    
+    num_blocks = len(model.blocks)
+    num_gpus = len(gpu_ids)
+    blocks_per_gpu = num_blocks // num_gpus
+    
+    log.info(f"Distributing {num_blocks} blocks across {num_gpus} GPUs ({blocks_per_gpu} blocks per GPU)")
+    
+    for i, block in enumerate(model.blocks):
+        target_gpu = gpu_ids[i // blocks_per_gpu]
+        if i < num_gpus * blocks_per_gpu:
+            block.to(f'cuda:{target_gpu}')
+            log.debug(f"Moved block {i} to GPU {target_gpu}")
+    
+    # Handle VACE blocks if they exist
+    if hasattr(model, 'vace_blocks') and model.vace_blocks:
+        num_vace_blocks = len(model.vace_blocks)
+        vace_blocks_per_gpu = num_vace_blocks // num_gpus
+        
+        for i, block in enumerate(model.vace_blocks):
+            target_gpu = gpu_ids[i // vace_blocks_per_gpu]
+            if i < num_gpus * vace_blocks_per_gpu:
+                block.to(f'cuda:{target_gpu}')
+                log.debug(f"Moved VACE block {i} to GPU {target_gpu}")
 
 def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
     seq_dim = 1
@@ -330,9 +418,9 @@ class WanSelfAttention(nn.Module):
     
     def forward_radial(self, q, k, v, dense_step=False):
         if dense_step:
-            x = RadialSpargeSageAttnDense(q, k, v, self.mask_map)
+            x = RadialSpargeSageAttention(q, k, v, self.mask_map)
         else:
-            x = RadialSpargeSageAttn(q, k, v, self.mask_map, decay_factor=self.decay_factor)
+            x = RadialSpargeSageAttention(q, k, v, self.mask_map, decay_factor=self.decay_factor)
 
         x = self.o(x.flatten(2))
 
@@ -999,6 +1087,10 @@ class WanModel(ModelMixin, ConfigMixin):
                  in_dim_ref_conv=16,
                  add_control_adapter=False,
                  in_dim_control_adapter=24,
+                 # Multi-GPU parallelism parameters
+                 parallelism_type='none',
+                 gpu_ids=None,
+                 enable_block_distribution=False,
                  ):
         r"""
         Initialize the diffusion model backbone.
@@ -1056,7 +1148,74 @@ class WanModel(ModelMixin, ConfigMixin):
         self.eps = eps
         self.attention_mode = attention_mode
         self.rope_func = rope_func
-        self.main_device = main_device
+        # Multi-GPU parallelism setup
+        self.parallelism_type = parallelism_type
+        self.gpu_ids = gpu_ids
+        self.enable_block_distribution = enable_block_distribution
+        self.parallel_devices = None
+        
+        # Setup device mapping based on parallelism type
+        if parallelism_type != 'none' and gpu_ids is not None:
+            available_gpus = get_available_gpus()
+            if available_gpus:
+                # Validate and setup GPU devices
+                if gpu_ids is None:
+                    gpu_ids = available_gpus
+                else:
+                    gpu_ids = [gpu_id for gpu_id in gpu_ids if gpu_id in available_gpus]
+                    if not gpu_ids:
+                        log.warning(f"None of the specified GPU IDs {gpu_ids} are available. Using all available GPUs: {available_gpus}")
+                        gpu_ids = available_gpus
+                
+                if len(gpu_ids) > 1:
+                    self.parallel_devices = [torch.device(f"cuda:{gpu_id}") for gpu_id in gpu_ids]
+                    main_device = self.parallel_devices[0]
+                    log.info(f"Multi-GPU setup: {len(gpu_ids)} GPUs, main device: {main_device}")
+                else:
+                    main_device = torch.device(f"cuda:{gpu_ids[0]}")
+            else:
+                log.warning("No CUDA GPUs available, falling back to CPU")
+                main_device = torch.device("cpu")
+        else:
+            main_device = main_device
+
+        # Multi-GPU parallelism setup
+        self.parallelism_type = parallelism_type
+        self.gpu_ids = gpu_ids
+        self.enable_block_distribution = enable_block_distribution
+        self.parallel_devices = None
+        
+        # Setup device mapping based on parallelism type
+        if parallelism_type != 'none' and gpu_ids is not None:
+            available_gpus = get_available_gpus()
+            if available_gpus:
+                # Validate and setup GPU devices
+                if gpu_ids is None:
+                    gpu_ids = available_gpus
+                else:
+                    gpu_ids = [gpu_id for gpu_id in gpu_ids if gpu_id in available_gpus]
+                    if not gpu_ids:
+                        log.warning("No valid GPU IDs provided, using all available GPUs")
+                        gpu_ids = available_gpus
+                
+                if len(gpu_ids) > 1:
+                    # Multi-GPU setup
+                    self.parallel_devices = [torch.device(f'cuda:{gpu_id}') for gpu_id in gpu_ids]
+                    self.main_device = self.parallel_devices[0]  # Primary device
+                    log.info(f"Multi-GPU setup: {len(gpu_ids)} GPUs, primary device: {self.main_device}")
+                else:
+                    # Single GPU setup
+                    self.main_device = torch.device(f'cuda:{gpu_ids[0]}')
+                    self.parallel_devices = None
+            else:
+                log.warning("No CUDA devices available, using CPU")
+                self.main_device = torch.device('cpu')
+                self.parallel_devices = None
+        else:
+            # Default single device setup
+            self.main_device = main_device
+            self.parallel_devices = None
+        
         self.offload_device = offload_device
 
         self.blocks_to_swap = -1
@@ -1194,6 +1353,28 @@ class WanModel(ModelMixin, ConfigMixin):
 
         self.block_mask=None
 
+    def apply_parallelism(self):
+        """
+        Apply the configured parallelism strategy to the model.
+        This should be called after model construction but before loading weights.
+        """
+        if self.parallelism_type == 'none' or self.parallel_devices is None:
+            return
+        
+        if self.parallelism_type == 'data_parallel':
+            # DataParallel will be applied by wrapping the model
+            log.info("DataParallel will be applied during model loading")
+        
+        elif self.parallelism_type == 'block_distribution' and self.enable_block_distribution:
+            # Distribute blocks across GPUs
+            distribute_model_blocks(self, self.gpu_ids)
+        
+        elif self.parallelism_type == 'distributed':
+            # DistributedDataParallel setup
+            log.info("DistributedDataParallel setup - requires proper DDP initialization")
+            # Note: Full DDP setup requires torch.distributed.init_process_group
+            # This is a placeholder for the actual implementation
+
     @staticmethod
     def _prepare_blockwise_causal_attn_mask(
         device: torch.device | str, num_frames: int = 21,
@@ -1245,16 +1426,38 @@ class WanModel(ModelMixin, ConfigMixin):
 
         total_offload_memory = 0
         total_main_memory = 0
-       
-        for b, block in tqdm(enumerate(self.blocks), total=len(self.blocks), desc="Initializing block swap"):
-            block_memory = get_module_memory_mb(block)
+        
+        # Handle multi-GPU block distribution
+        if self.parallel_devices and len(self.parallel_devices) > 1:
+            log.info("Multi-GPU block swapping detected")
+            devices = self.parallel_devices
+            num_blocks = len(self.blocks)
+            blocks_per_device = num_blocks // len(devices)
             
-            if b > self.blocks_to_swap:
-                block.to(self.main_device)
-                total_main_memory += block_memory
-            else:
-                block.to(self.offload_device, non_blocking=self.use_non_blocking)
-                total_offload_memory += block_memory
+            for b, block in tqdm(enumerate(self.blocks), total=len(self.blocks), desc="Initializing multi-GPU block swap"):
+                block_memory = get_module_memory_mb(block)
+                
+                # Determine target device based on block distribution strategy
+                if b > self.blocks_to_swap:
+                    # Keep blocks on their assigned GPU or move to main device
+                    target_device = devices[min(b // blocks_per_device, len(devices) - 1)]
+                    block.to(target_device)
+                    total_main_memory += block_memory
+                else:
+                    # Offload to CPU
+                    block.to(self.offload_device, non_blocking=self.use_non_blocking)
+                    total_offload_memory += block_memory
+        else:
+            # Single GPU or CPU offloading
+            for b, block in tqdm(enumerate(self.blocks), total=len(self.blocks), desc="Initializing block swap"):
+                block_memory = get_module_memory_mb(block)
+                
+                if b > self.blocks_to_swap:
+                    block.to(self.main_device)
+                    total_main_memory += block_memory
+                else:
+                    block.to(self.offload_device, non_blocking=self.use_non_blocking)
+                    total_offload_memory += block_memory
 
         if blocks_to_swap != -1 and vace_blocks_to_swap == 0:
             vace_blocks_to_swap = 1
@@ -1795,8 +1998,18 @@ class WanModel(ModelMixin, ConfigMixin):
                     if b in self.slg_blocks and is_uncond:
                         if self.slg_start_percent <= current_step_percentage <= self.slg_end_percent:
                             continue
-                if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
-                    block.to(self.main_device)
+                
+                # Handle multi-GPU block movement
+                if self.parallel_devices and len(self.parallel_devices) > 1:
+                    if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
+                        # Move block to its assigned GPU
+                        target_device = self.parallel_devices[min(b // (len(self.blocks) // len(self.parallel_devices)), len(self.parallel_devices) - 1)]
+                        block.to(target_device)
+                else:
+                    # Single GPU case
+                    if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
+                        block.to(self.main_device)
+                
                 x = block(x, **kwargs)
 
                 #uni3c controlnet
@@ -1806,8 +2019,16 @@ class WanModel(ModelMixin, ConfigMixin):
                 if (controlnet is not None) and (b % controlnet["controlnet_stride"] == 0) and (b // controlnet["controlnet_stride"] < len(controlnet["controlnet_states"])):
                     x[:, :x_len] += controlnet["controlnet_states"][b // controlnet["controlnet_stride"]].to(x) * controlnet["controlnet_weight"]
 
-                if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
-                    block.to(self.offload_device, non_blocking=self.use_non_blocking)
+                # Handle multi-GPU block offloading
+                if self.parallel_devices and len(self.parallel_devices) > 1:
+                    if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
+                        # Move block back to its assigned GPU or offload to CPU
+                        target_device = self.parallel_devices[min(b // (len(self.blocks) // len(self.parallel_devices)), len(self.parallel_devices) - 1)]
+                        block.to(target_device, non_blocking=self.use_non_blocking)
+                else:
+                    # Single GPU case
+                    if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
+                        block.to(self.offload_device, non_blocking=self.use_non_blocking)
 
             if self.enable_teacache and (self.teacache_start_step <= current_step <= self.teacache_end_step) and pred_id is not None:
                 self.teacache_state.update(

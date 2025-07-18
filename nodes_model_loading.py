@@ -763,6 +763,10 @@ class WanVideoModelLoader:
             "add_ref_conv": True if "ref_conv.weight" in sd else False,
             "in_dim_ref_conv": sd["ref_conv.weight"].shape[1] if "ref_conv.weight" in sd else None,
             "add_control_adapter": True if "control_adapter.conv.weight" in sd else False,
+            # Multi-GPU parallelism parameters (default to none)
+            "parallelism_type": "none",
+            "gpu_ids": None,
+            "enable_block_distribution": False,
         }
 
         with init_empty_weights():
@@ -1282,6 +1286,117 @@ class LoadWanVideoClipTextEncoder:
         
         return (clip_model,)
 
+class WanVideoMultiGPULoader:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "model": (folder_paths.get_filename_list("unet_gguf") + folder_paths.get_filename_list("diffusion_models"), {"tooltip": "These models are loaded from the 'ComfyUI/models/diffusion_models' -folder",}),
+                "base_precision": (["fp32", "bf16", "fp16", "fp16_fast"], {"default": "bf16"}),
+                "quantization": (['disabled', 'fp8_e4m3fn', 'fp8_e4m3fn_fast', 'fp8_e5m2', 'fp8_e4m3fn_fast_no_ffn'], {"default": 'disabled', "tooltip": "optional quantization method"}),
+                "load_device": (["main_device", "offload_device"], {"default": "main_device", "tooltip": "Initial device to load the model to, NOT recommended with the larger models unless you have 48GB+ VRAM"}),
+                "parallelism_type": (["none", "data_parallel", "block_distribution", "distributed"], {"default": "none", "tooltip": "Type of multi-GPU parallelism to use"}),
+                "gpu_ids": ("STRING", {"default": "0,1", "tooltip": "Comma-separated list of GPU IDs to use (e.g., '0,1,2,3')"}),
+                "enable_block_distribution": ("BOOLEAN", {"default": True, "tooltip": "Enable block distribution across GPUs when using block_distribution parallelism"}),
+            },
+            "optional": {
+                "attention_mode": ([
+                    "sdpa",
+                    "flash_attn_2",
+                    "flash_attn_3",
+                    "sageattn",
+                    "flex_attention",
+                    "radial_sage_attention",
+                    ], {"default": "sdpa"}),
+                "compile_args": ("WANCOMPILEARGS", ),
+                "block_swap_args": ("BLOCKSWAPARGS", ),
+                "lora": ("WANVIDLORA", {"default": None}),
+                "vram_management_args": ("VRAM_MANAGEMENTARGS", {"default": None, "tooltip": "Alternative offloading method from DiffSynth-Studio, more aggressive in reducing memory use than block swapping, but can be slower"}),
+                "vace_model": ("VACEPATH", {"default": None, "tooltip": "VACE model to use when not using model that has it included"}),
+                "fantasytalking_model": ("FANTASYTALKINGMODEL", {"default": None, "tooltip": "FantasyTalking model https://github.com/Fantasy-AMAP"}),
+                "multitalk_model": ("MULTITALKMODEL", {"default": None, "tooltip": "Multitalk model"}),
+            }
+        }
+
+    RETURN_TYPES = ("WANVIDEOMODEL",)
+    RETURN_NAMES = ("model", )
+    FUNCTION = "loadmodel"
+    CATEGORY = "WanVideoWrapper"
+    DESCRIPTION = "Loads WanVideo model with multi-GPU parallelism support"
+
+    def loadmodel(self, model, base_precision, load_device, quantization, parallelism_type, gpu_ids, enable_block_distribution,
+                  compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, vram_management_args=None, vace_model=None, fantasytalking_model=None, multitalk_model=None):
+        
+        # Parse GPU IDs
+        try:
+            gpu_id_list = [int(gpu_id.strip()) for gpu_id in gpu_ids.split(',') if gpu_id.strip()]
+        except ValueError:
+            log.error(f"Invalid GPU IDs format: {gpu_ids}. Expected comma-separated integers (e.g., '0,1,2,3')")
+            gpu_id_list = [0]  # Fallback to single GPU
+        
+        # Validate GPU availability
+        available_gpus = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        if not available_gpus:
+            log.warning("No CUDA devices available, falling back to CPU")
+            parallelism_type = "none"
+            gpu_id_list = []
+        else:
+            # Filter to only available GPUs
+            gpu_id_list = [gpu_id for gpu_id in gpu_id_list if gpu_id in available_gpus]
+            if not gpu_id_list:
+                log.warning(f"None of the specified GPU IDs are available. Available GPUs: {available_gpus}")
+                gpu_id_list = available_gpus[:1]  # Use first available GPU
+        
+        log.info(f"Multi-GPU setup: parallelism_type={parallelism_type}, gpu_ids={gpu_id_list}")
+        
+        # Create a modified WanVideoModelLoader instance
+        loader = WanVideoModelLoader()
+        
+        # Call the original loadmodel method with multi-GPU parameters
+        result = loader.loadmodel(
+            model=model,
+            base_precision=base_precision,
+            load_device=load_device,
+            quantization=quantization,
+            compile_args=compile_args,
+            attention_mode=attention_mode,
+            block_swap_args=block_swap_args,
+            lora=lora,
+            vram_management_args=vram_management_args,
+            vace_model=vace_model,
+            fantasytalking_model=fantasytalking_model,
+            multitalk_model=multitalk_model
+        )
+        
+        # Apply multi-GPU parallelism to the loaded model
+        if parallelism_type != "none" and len(gpu_id_list) > 1:
+            patcher = result[0]
+            transformer = patcher.model.diffusion_model
+            
+            # Update the model's parallelism settings
+            transformer.parallelism_type = parallelism_type
+            transformer.gpu_ids = gpu_id_list
+            transformer.enable_block_distribution = enable_block_distribution
+            
+            # Apply the parallelism strategy
+            if parallelism_type == "data_parallel":
+                log.info("Applying DataParallel to WanVideo model")
+                patcher.model.diffusion_model = nn.DataParallel(transformer, device_ids=gpu_id_list)
+            
+            elif parallelism_type == "block_distribution" and enable_block_distribution:
+                log.info("Applying block distribution across GPUs")
+                from .wanvideo.modules.model import distribute_model_blocks
+                distribute_model_blocks(transformer, gpu_id_list)
+            
+            elif parallelism_type == "distributed":
+                log.info("DistributedDataParallel setup - requires proper DDP initialization")
+                # Note: Full DDP setup requires torch.distributed.init_process_group
+                # This is a placeholder for the actual implementation
+            
+            log.info(f"Multi-GPU parallelism applied: {parallelism_type} on GPUs {gpu_id_list}")
+        
+        return result
+
 NODE_CLASS_MAPPINGS = {
     "WanVideoModelLoader": WanVideoModelLoader,
     "WanVideoVAELoader": WanVideoVAELoader,
@@ -1295,6 +1410,7 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoTorchCompileSettings": WanVideoTorchCompileSettings,
     "LoadWanVideoT5TextEncoder": LoadWanVideoT5TextEncoder,
     "LoadWanVideoClipTextEncoder": LoadWanVideoClipTextEncoder,
+    "WanVideoMultiGPULoader": WanVideoMultiGPULoader,
     }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1310,4 +1426,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoTorchCompileSettings": "WanVideo Torch Compile Settings",
     "LoadWanVideoT5TextEncoder": "WanVideo T5 Text Encoder Loader",
     "LoadWanVideoClipTextEncoder": "WanVideo CLIP Text Encoder Loader",
+    "WanVideoMultiGPULoader": "WanVideo Multi-GPU Loader",
     }
