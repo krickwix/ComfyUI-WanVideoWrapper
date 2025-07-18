@@ -22,16 +22,17 @@ except:
     radial_sage_attention = None
     pass
 
-from .wan_attention import WanSelfAttention, WanT2VCrossAttention, WanI2VCrossAttention
-from .wan_attention_block import WanAttentionBlock, VaceWanAttentionBlock, BaseWanAttentionBlock
-from .wan_head import Head
-from .wan_mlp_proj import MLPProj
-from .wan_rope import rope_apply, rope_params, apply_rope_comfy_chunked
-from .wan_cache import TeaCache, MagCache, EasyCache
-from .wan_utils import get_module_memory_mb, get_autocast_device, get_torch_device
-from .wan_utils import relative_l1_distance
+# WanSelfAttention, WanT2VCrossAttention, WanI2VCrossAttention are defined in this file
+# WanAttentionBlock, VaceWanAttentionBlock, BaseWanAttentionBlock are defined in this file
+# Head, MLPProj are defined in this file
+# rope_apply, rope_params, apply_rope_comfy_chunked are defined in this file
+# TeaCacheState, MagCacheState, EasyCacheState are in cache_methods
+from ...cache_methods.cache_methods import TeaCacheState, MagCacheState, EasyCacheState
+# get_module_memory_mb, get_autocast_device, get_torch_device, relative_l1_distance are in utils.py
+from ...utils import get_module_memory_mb, get_autocast_device, get_torch_device, relative_l1_distance
 
 import logging
+import comfy.model_management as mm
 log = logging.getLogger(__name__)
 
 def get_available_gpus():
