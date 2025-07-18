@@ -30,6 +30,8 @@ except:
 from ...cache_methods.cache_methods import TeaCacheState, MagCacheState, EasyCacheState
 # get_module_memory_mb is in utils.py
 from ...utils import get_module_memory_mb
+# attention function is in attention.py
+from .attention import attention
 
 import logging
 import comfy.model_management as mm
