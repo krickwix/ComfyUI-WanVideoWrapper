@@ -2389,6 +2389,14 @@ class WanVideoSampler:
                                 noise_pred_context = noise_pred_context[:noise_pred.shape[0]]
                                 window_mask = window_mask[:noise_pred.shape[0]] if window_mask.shape[0] != noise_pred.shape[0] else window_mask
                         
+                        # Ensure device synchronization for block distribution
+                        # Block distribution may return tensors on different GPUs, sync to noise_pred device
+                        target_device = noise_pred.device
+                        if noise_pred_context.device != target_device:
+                            noise_pred_context = noise_pred_context.to(target_device)
+                        if window_mask.device != target_device:
+                            window_mask = window_mask.to(target_device)
+                        
                         noise_pred[:, c] += noise_pred_context * window_mask
                         counter[:, c] += window_mask
                         context_pbar.update_absolute(step_start_progress + (i + 1) * fraction_per_context, steps)
