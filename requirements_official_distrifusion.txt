@@ -1,0 +1,17 @@
+# Official DistriFusion Requirements
+# This file contains the exact versions needed for official DistriFusion
+
+ftfy
+accelerate>=1.2.1
+einops
+diffusers==0.24.0
+huggingface_hub<0.20.0
+peft>=0.15.0
+sentencepiece>=0.2.0
+protobuf
+pyloudnorm
+gguf>=0.14.0
+distrifuser @ git+https://github.com/mit-han-lab/distrifuser.git
+
+# Important: Official DistriFusion requires diffusers==0.24.0
+# Do not upgrade diffusers if you want to use official DistriFusion 

@@ -1,0 +1,16 @@
+# WanVideoWrapper Requirements (Compatible with newer diffusers)
+# Use this if you want to use newer diffusers versions without official DistriFusion
+
+ftfy
+accelerate>=1.2.1
+einops
+diffusers>=0.33.0
+huggingface_hub<0.20.0
+peft>=0.15.0
+sentencepiece>=0.2.0
+protobuf
+pyloudnorm
+gguf>=0.14.0
+
+# Note: Official DistriFusion requires diffusers==0.24.0
+# If you want to use official DistriFusion, use requirements.txt instead 

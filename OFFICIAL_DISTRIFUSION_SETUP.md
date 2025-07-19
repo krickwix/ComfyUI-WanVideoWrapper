@@ -14,8 +14,10 @@ pip install git+https://github.com/mit-han-lab/distrifuser.git
 ### 2. Install WanVideoWrapper Dependencies
 ```bash
 cd ComfyUI/custom_nodes/ComfyUI-WanVideoWrapper
-pip install -r requirements.txt
+pip install -r requirements_official_distrifusion.txt
 ```
+
+**Note**: Official DistriFusion requires `diffusers==0.24.0`. If you want to use newer diffusers versions without official DistriFusion, use `requirements_compatible.txt` instead.
 
 ### 3. Fix HuggingFace Hub Dependency (if needed)
 ```bash
@@ -112,8 +114,13 @@ Use the **"🎯 Official DistriFusion Status"** node to monitor:
    Install with: pip install git+https://github.com/mit-han-lab/distrifuser.git
 ```
 
-**Solution**: Install the official package
+**Solution**: Install the official package with compatible dependencies
 ```bash
+# Option 1: Use the dedicated requirements file
+pip install -r requirements_official_distrifusion.txt
+
+# Option 2: Install manually with correct versions
+pip install diffusers==0.24.0
 pip install git+https://github.com/mit-han-lab/distrifuser.git
 ```
 
