@@ -8,3 +8,4 @@ sentencepiece>=0.2.0
 protobuf
 pyloudnorm
 gguf>=0.14.0
+distrifuser @ git+https://github.com/mit-han-lab/distrifuser.git

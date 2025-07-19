@@ -37,31 +37,51 @@ DistriFusionStatus = None
 DistriFusionModelLoader = None
 DistriFusionDistributionConfig = None
 
+# Official DistriFusion imports (MIT-HAN-Lab implementation)
+OFFICIAL_DISTRIFUSION_AVAILABLE = False
+OfficialDistriFusionModelLoader = None
+OfficialDistriFusionSampler = None
+OfficialDistriFusionStatus = None
+
 try:
     # Check for required dependencies first
     import torch
     import torch.distributed
     
-    # Then try importing DistriFusion modules
-    from .distrifusion import (
-        DistriFusionWanVideoModelLoader,
-        DistriFusionWanVideoSampler,
-        DistriFusionSetup,
-        DistriFusionStatus,
-        DistriFusionModelLoader,
-        DistriFusionDistributionConfig
-    )
-    DISTRIFUSION_AVAILABLE = True
-    print("✅ DistriFusion nodes loaded successfully")
+    # Try importing custom DistriFusion modules
+    try:
+        from .distrifusion import (
+            DistriFusionWanVideoModelLoader,
+            DistriFusionWanVideoSampler,
+            DistriFusionSetup,
+            DistriFusionStatus,
+            DistriFusionModelLoader,
+            DistriFusionDistributionConfig
+        )
+        DISTRIFUSION_AVAILABLE = True
+        print("✅ Custom DistriFusion nodes loaded successfully")
+    except ImportError as e:
+        print(f"⚠️ Custom DistriFusion not available: {e}")
+    
+    # Try importing official DistriFusion modules
+    try:
+        from .distrifusion_official_nodes import (
+            OfficialDistriFusionModelLoader,
+            OfficialDistriFusionSampler,
+            OfficialDistriFusionStatus
+        )
+        OFFICIAL_DISTRIFUSION_AVAILABLE = True
+        print("✅ Official DistriFusion nodes loaded successfully")
+    except ImportError as e:
+        print(f"⚠️ Official DistriFusion not available: {e}")
+        print("   Install with: pip install git+https://github.com/mit-han-lab/distrifuser.git")
     
 except ImportError as e:
-    print(f"⚠️ DistriFusion not available: {e}")
-    print("   This is normal if PyTorch or other dependencies are not installed.")
+    print(f"⚠️ PyTorch not available: {e}")
+    print("   This is normal if PyTorch is not installed.")
     print("   DistriFusion nodes will not appear in the node list.")
-    DISTRIFUSION_AVAILABLE = False
 except Exception as e:
     print(f"⚠️ DistriFusion import error: {e}")
-    DISTRIFUSION_AVAILABLE = False
 
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps
 
@@ -2994,7 +3014,22 @@ if DISTRIFUSION_AVAILABLE:
         distrifusion_nodes["DistriFusionStatus"] = DistriFusionStatus
     
     NODE_CLASS_MAPPINGS.update(distrifusion_nodes)
-    print(f"📝 Registered {len(distrifusion_nodes)} DistriFusion nodes")
+    print(f"📝 Registered {len(distrifusion_nodes)} custom DistriFusion nodes")
+
+# Add Official DistriFusion nodes if available
+if OFFICIAL_DISTRIFUSION_AVAILABLE:
+    official_distrifusion_nodes = {}
+    
+    # Only add nodes that are actually imported successfully
+    if OfficialDistriFusionModelLoader is not None:
+        official_distrifusion_nodes["OfficialDistriFusionModelLoader"] = OfficialDistriFusionModelLoader
+    if OfficialDistriFusionSampler is not None:
+        official_distrifusion_nodes["OfficialDistriFusionSampler"] = OfficialDistriFusionSampler
+    if OfficialDistriFusionStatus is not None:
+        official_distrifusion_nodes["OfficialDistriFusionStatus"] = OfficialDistriFusionStatus
+    
+    NODE_CLASS_MAPPINGS.update(official_distrifusion_nodes)
+    print(f"📝 Registered {len(official_distrifusion_nodes)} official DistriFusion nodes")
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
     "WanVideoDecode": "WanVideo Decode",
@@ -3042,4 +3077,19 @@ if DISTRIFUSION_AVAILABLE:
         distrifusion_display_names["DistriFusionStatus"] = "DistriFusion Status"
     
     NODE_DISPLAY_NAME_MAPPINGS.update(distrifusion_display_names)
-    print(f"📝 Registered {len(distrifusion_display_names)} DistriFusion display names")
+    print(f"📝 Registered {len(distrifusion_display_names)} custom DistriFusion display names")
+
+# Add Official DistriFusion display names if available
+if OFFICIAL_DISTRIFUSION_AVAILABLE:
+    official_distrifusion_display_names = {}
+    
+    # Only add display names for nodes that are actually available
+    if OfficialDistriFusionModelLoader is not None:
+        official_distrifusion_display_names["OfficialDistriFusionModelLoader"] = "🎯 Official DistriFusion Model Loader"
+    if OfficialDistriFusionSampler is not None:
+        official_distrifusion_display_names["OfficialDistriFusionSampler"] = "🎯 Official DistriFusion Sampler"
+    if OfficialDistriFusionStatus is not None:
+        official_distrifusion_display_names["OfficialDistriFusionStatus"] = "🎯 Official DistriFusion Status"
+    
+    NODE_DISPLAY_NAME_MAPPINGS.update(official_distrifusion_display_names)
+    print(f"📝 Registered {len(official_distrifusion_display_names)} official DistriFusion display names")
