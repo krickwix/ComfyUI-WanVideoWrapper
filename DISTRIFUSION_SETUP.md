@@ -50,6 +50,9 @@ For DistriFusion nodes to appear, you need:
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install diffusers accelerate transformers
 
+# Fix huggingface_hub dependency issue (if needed)
+pip install huggingface_hub<0.20.0 --force-reinstall
+
 # Optional but recommended
 pip install xformers  # For memory efficiency
 ```
@@ -58,9 +61,13 @@ pip install xformers  # For memory efficiency
 
 ### Nodes Don't Appear
 1. **Check ComfyUI Console** for import error messages
-2. **Verify Dependencies**: Run the verification script above
-3. **Restart ComfyUI** completely after installing dependencies
-4. **Check CUDA**: Ensure PyTorch detects your GPUs with `torch.cuda.is_available()`
+2. **Fix HuggingFace Hub Issue** (if you see `cached_download` errors):
+   ```bash
+   pip install huggingface_hub<0.20.0 --force-reinstall
+   ```
+3. **Verify Dependencies**: Run the verification script above
+4. **Restart ComfyUI** completely after installing dependencies
+5. **Check CUDA**: Ensure PyTorch detects your GPUs with `torch.cuda.is_available()`
 
 ### Import Warnings
 The following warnings are **NORMAL** if dependencies are missing:
@@ -71,6 +78,19 @@ Warning: Could not import patch manager: [...]
 ```
 
 These indicate DistriFusion is properly detecting missing dependencies and will enable automatically once you install them.
+
+### HuggingFace Hub Errors
+If you see this error in ComfyUI console:
+```
+ImportError: cannot import name 'cached_download' from 'huggingface_hub'
+```
+
+**Fix it immediately**:
+```bash
+pip install huggingface_hub<0.20.0 --force-reinstall
+```
+
+This is a common dependency conflict where `diffusers` expects an older version of `huggingface_hub`.
 
 ### Clear Error Messages
 DistriFusion now provides clear feedback:
