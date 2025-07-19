@@ -1479,6 +1479,25 @@ class WanVideoMultiGPULoader:
                             
                             return scattered_inputs, scattered_kwargs
                         
+                        def __getattr__(self, name):
+                            # Forward attribute access to the underlying module
+                            # This ensures attributes like 'teacache_state' are accessible
+                            try:
+                                return super().__getattr__(name)
+                            except AttributeError:
+                                # If not found in DataParallel, check the underlying module
+                                if hasattr(self, 'module') and hasattr(self.module, name):
+                                    return getattr(self.module, name)
+                                raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+                        
+                        def __setattr__(self, name, value):
+                            # Forward attribute setting to the underlying module for specific attributes
+                            # This ensures cache-related attributes can be set properly
+                            if name in ['teacache_state'] and hasattr(self, 'module'):
+                                setattr(self.module, name, value)
+                            else:
+                                super().__setattr__(name, value)
+                        
                         def forward(self, *inputs, **kwargs):
                             # Use single GPU if only one available
                             if len(self.device_ids) == 1:
