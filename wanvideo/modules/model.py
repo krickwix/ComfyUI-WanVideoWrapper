@@ -168,9 +168,9 @@ def apply_rope_comfy(xq, xk, freqs_cis):
         xk_reshaped = xk.to(dtype=freqs_cis.dtype).reshape(*xk.shape[:-1], -1, 2)
         
         # Apply rotation matrices: [x', y'] = R @ [x, y]
-        # freqs_cis[..., :, :] is the 2x2 rotation matrix
-        xq_out = torch.einsum('...ij,...j->...i', freqs_cis, xq_reshaped).reshape(*xq.shape).type_as(xq)
-        xk_out = torch.einsum('...ij,...j->...i', freqs_cis, xk_reshaped).reshape(*xk.shape).type_as(xk)
+        # Use proper einsum pattern for batched matrix multiplication
+        xq_out = torch.einsum('...dij,...dj->...di', freqs_cis, xq_reshaped).reshape(*xq.shape).type_as(xq)
+        xk_out = torch.einsum('...dij,...dj->...di', freqs_cis, xk_reshaped).reshape(*xk.shape).type_as(xk)
         
     else:
         # Original cos/sin format: freqs_cis shape: [..., 2]
@@ -219,7 +219,7 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
         if use_rotation_matrices:
             # Handle rotation matrix format
             xq_reshaped = xq_chunk.to(dtype=freqs_cis.dtype).reshape(*xq_chunk.shape[:-1], -1, 2)
-            xq_out[tuple(slices)] = torch.einsum('...ij,...j->...i', freqs_chunk, xq_reshaped).reshape(*xq_chunk.shape).type_as(xq)
+            xq_out[tuple(slices)] = torch.einsum('...dij,...dj->...di', freqs_chunk, xq_reshaped).reshape(*xq_chunk.shape).type_as(xq)
         else:
             # Handle cos/sin format
             xq_chunk_ = xq_chunk.to(dtype=freqs_cis.dtype).reshape(*xq_chunk.shape[:-1], -1, 1, 2)
@@ -247,7 +247,7 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
         if use_rotation_matrices:
             # Handle rotation matrix format
             xk_reshaped = xk_chunk.to(dtype=freqs_cis.dtype).reshape(*xk_chunk.shape[:-1], -1, 2)
-            xk_out[tuple(slices)] = torch.einsum('...ij,...j->...i', freqs_chunk, xk_reshaped).reshape(*xk_chunk.shape).type_as(xk)
+            xk_out[tuple(slices)] = torch.einsum('...dij,...dj->...di', freqs_chunk, xk_reshaped).reshape(*xk_chunk.shape).type_as(xk)
         else:
             # Handle cos/sin format
             xk_chunk_ = xk_chunk.to(dtype=freqs_cis.dtype).reshape(*xk_chunk.shape[:-1], -1, 1, 2)
