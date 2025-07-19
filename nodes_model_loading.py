@@ -1416,9 +1416,10 @@ class WanVideoMultiGPULoader:
                         test_tensor = torch.zeros(1).to(f'cuda:{gpu_id}')
                         del test_tensor
                     
-                    # Apply DataParallel with error handling
-                    patcher.model.diffusion_model = nn.DataParallel(transformer, device_ids=gpu_id_list)
-                    log.info(f"DataParallel successfully applied on GPUs: {gpu_id_list}")
+                    # WanVideo models have complex input structures that don't work well with DataParallel
+                    # Skip DataParallel and use manual distribution instead
+                    log.warning("WanVideo models have complex inputs - using manual parallelism instead of DataParallel")
+                    raise Exception("Falling back to manual parallelism for WanVideo compatibility")
                     
                 except Exception as e:
                     log.warning(f"DataParallel failed with error: {e}")
@@ -1430,6 +1431,7 @@ class WanVideoMultiGPULoader:
                         log.info("Falling back to manual parallelism without NCCL")
                         
                         # Use manual parallelism as fallback for shm issues
+                        log.info("Applying manual parallelism as fallback (better for WanVideo anyway)")
                         if len(gpu_id_list) > 1:
                             transformer.to(f'cuda:{gpu_id_list[0]}')
                             if enable_block_distribution and hasattr(transformer, 'blocks'):
@@ -1437,9 +1439,11 @@ class WanVideoMultiGPULoader:
                                 from .wanvideo.modules.model import distribute_model_blocks
                                 distribute_model_blocks(transformer, gpu_id_list)
                             patcher.model.diffusion_model = transformer
+                            log.info(f"Manual parallelism fallback successful on GPUs: {gpu_id_list}")
                         else:
                             transformer.to(f'cuda:{gpu_id_list[0]}')
                             patcher.model.diffusion_model = transformer
+                            log.info(f"Single GPU fallback on GPU {gpu_id_list[0]}")
                     else:
                         log.info("Falling back to block distribution or single GPU")
                         
@@ -1463,7 +1467,9 @@ class WanVideoMultiGPULoader:
                 # This is a placeholder for the actual implementation
                 
             elif parallelism_type == "manual_parallel":
-                log.info("Applying manual multi-GPU parallelism (no NCCL)")
+                log.info("Applying manual multi-GPU parallelism (RECOMMENDED for WanVideo)")
+                log.info("This approach avoids DataParallel input distribution issues")
+                
                 # This approach manually distributes model components without DataParallel
                 if len(gpu_id_list) > 1:
                     # Keep the main model on first GPU
@@ -1474,12 +1480,14 @@ class WanVideoMultiGPULoader:
                         log.info("Distributing model blocks across GPUs manually")
                         from .wanvideo.modules.model import distribute_model_blocks
                         distribute_model_blocks(transformer, gpu_id_list)
+                        log.info("Block distribution provides good parallelism without NCCL complexity")
                     
                     patcher.model.diffusion_model = transformer
-                    log.info(f"Manual parallelism applied across GPUs: {gpu_id_list}")
+                    log.info(f"Manual parallelism successfully applied across GPUs: {gpu_id_list}")
                 else:
                     transformer.to(f'cuda:{gpu_id_list[0]}')
                     patcher.model.diffusion_model = transformer
+                    log.info(f"Single GPU mode on GPU {gpu_id_list[0]}")
             
             log.info(f"Multi-GPU parallelism applied: {parallelism_type} on GPUs {gpu_id_list}")
         
