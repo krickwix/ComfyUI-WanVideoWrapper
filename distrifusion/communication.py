@@ -12,7 +12,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 import comfy.model_management as mm
-from utils import log
+
+try:
+    from ..utils import log
+except ImportError:
+    # Fallback for different import contexts
+    import logging
+    log = logging.getLogger(__name__)
 
 
 class AsyncPatchCommunicator:

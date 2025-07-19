@@ -9,11 +9,26 @@ import torch.distributed as dist
 from typing import Dict, List, Optional, Tuple, Any, Union
 import threading
 import time
-from wanvideo.modules.model import WanModel
+try:
+    from ..wanvideo.modules.model import WanModel
+except ImportError:
+    # Fallback for different import contexts
+    try:
+        from wanvideo.modules.model import WanModel
+    except ImportError:
+        WanModel = None
+        print("Warning: WanModel not available")
+
 from .patch_manager import PatchManager, PatchConfig, PatchSplitMode
 from .communication import AsyncPatchCommunicator, DistributedManager
 import comfy.model_management as mm
-from utils import log
+
+try:
+    from ..utils import log
+except ImportError:
+    # Fallback for different import contexts
+    import logging
+    log = logging.getLogger(__name__)
 
 
 class DistriFusionWanModel(nn.Module):
@@ -23,11 +38,24 @@ class DistriFusionWanModel(nn.Module):
     """
     
     def __init__(self, 
-                 wan_model: WanModel,
+                 wan_model,  # Remove type hint since WanModel might be None
                  patch_config: PatchConfig,
                  world_size: int = 2,
                  rank: int = 0):
         super().__init__()
+        
+        # Check if WanModel is available
+        if WanModel is None:
+            raise ImportError(
+                "WanModel is not available. Please ensure that the wanvideo module "
+                "is properly installed and accessible."
+            )
+        
+        if wan_model is None:
+            raise ValueError("wan_model cannot be None")
+        
+        if not isinstance(wan_model, WanModel):
+            raise TypeError(f"Expected WanModel, got {type(wan_model)}")
         
         self.wan_model = wan_model
         self.patch_config = patch_config
@@ -299,12 +327,12 @@ class DistriFusionWanModel(nn.Module):
         return self.wan_model.load_state_dict(state_dict, *args, **kwargs)
 
 
-def create_distrifusion_model(wan_model: WanModel,
+def create_distrifusion_model(wan_model,  # Remove type hint since WanModel might be None
                              num_devices: int = 2,
                              split_mode: str = "spatial",
                              patch_overlap: int = 8,
                              world_size: int = 2,
-                             rank: int = 0) -> DistriFusionWanModel:
+                             rank: int = 0):
     """
     Factory function to create DistriFusion model
     
@@ -319,6 +347,13 @@ def create_distrifusion_model(wan_model: WanModel,
     Returns:
         DistriFusion wrapped model
     """
+    # Check if WanModel is available
+    if WanModel is None:
+        raise ImportError(
+            "WanModel is not available. Please ensure that the wanvideo module "
+            "is properly installed and accessible."
+        )
+    
     # Convert string to enum
     mode_map = {
         "spatial": PatchSplitMode.SPATIAL_ONLY,

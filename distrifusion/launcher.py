@@ -10,7 +10,13 @@ import argparse
 import torch
 import signal
 from typing import List, Optional
-from utils import log
+
+try:
+    from ..utils import log
+except ImportError:
+    # Fallback for different import contexts
+    import logging
+    log = logging.getLogger(__name__)
 
 
 class DistriFusionLauncher:

@@ -8,9 +8,33 @@ import os
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import load_torch_file
-from utils import log
-from nodes_model_loading import WanVideoModelLoader
-from nodes import WanVideoSampler
+
+try:
+    from ..utils import log
+except ImportError:
+    # Fallback for different import contexts
+    import logging
+    log = logging.getLogger(__name__)
+
+try:
+    from ..nodes_model_loading import WanVideoModelLoader
+except ImportError:
+    # Fallback for different import contexts
+    try:
+        from nodes_model_loading import WanVideoModelLoader
+    except ImportError:
+        WanVideoModelLoader = None
+        print("Warning: WanVideoModelLoader not available")
+
+try:
+    from ..nodes import WanVideoSampler
+except ImportError:
+    # Fallback for different import contexts
+    try:
+        from nodes import WanVideoSampler
+    except ImportError:
+        WanVideoSampler = None
+        print("Warning: WanVideoSampler not available")
 from .distrifusion_wrapper import DistriFusionWanModel, create_distrifusion_model
 from .patch_manager import PatchConfig, PatchSplitMode
 from typing import Dict, Any, Tuple, List, Optional
@@ -88,6 +112,12 @@ class DistriFusionWanVideoModelLoader:
                 enable_distrifusion = False
 
         # First load the regular WanVideo model
+        if WanVideoModelLoader is None:
+            raise ImportError(
+                "WanVideoModelLoader is not available. Please ensure that the "
+                "nodes_model_loading module is properly accessible."
+            )
+        
         model_loader = WanVideoModelLoader()
         wan_model_patcher = model_loader.loadmodel(
             model=model,

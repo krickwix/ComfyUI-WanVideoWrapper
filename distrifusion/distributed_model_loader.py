@@ -8,8 +8,23 @@ import torch.distributed as dist
 import os
 import folder_paths
 import comfy.model_management as mm
-from utils import log
-from nodes_model_loading import WanVideoModelLoader
+
+try:
+    from ..utils import log
+except ImportError:
+    # Fallback for different import contexts
+    import logging
+    log = logging.getLogger(__name__)
+
+try:
+    from ..nodes_model_loading import WanVideoModelLoader
+except ImportError:
+    # Fallback for different import contexts
+    try:
+        from nodes_model_loading import WanVideoModelLoader
+    except ImportError:
+        WanVideoModelLoader = None
+        print("Warning: WanVideoModelLoader not available")
 from .distrifusion_wrapper import create_distrifusion_model
 from .patch_manager import PatchConfig, PatchSplitMode
 from .communication import DistributedManager
@@ -119,6 +134,13 @@ class DistriFusionModelLoader:
     def _load_single_gpu(self, model, precision, quantization, attention_mode, lora, status_messages):
         """Load model for single GPU inference"""
         status_messages.append("Loading single GPU model...")
+        
+        # Check if WanVideoModelLoader is available
+        if WanVideoModelLoader is None:
+            raise ImportError(
+                "WanVideoModelLoader is not available. Please ensure that the "
+                "nodes_model_loading module is properly accessible."
+            )
         
         # Use standard WanVideo loader
         loader = WanVideoModelLoader()
@@ -230,6 +252,13 @@ class DistriFusionModelLoader:
         if memory_optimization == "memory" and quantization == "disabled":
             quantization = "fp8_e4m3fn"
             status_messages.append("Applied auto-quantization for memory optimization")
+        
+        # Check if WanVideoModelLoader is available
+        if WanVideoModelLoader is None:
+            raise ImportError(
+                "WanVideoModelLoader is not available. Please ensure that the "
+                "nodes_model_loading module is properly accessible."
+            )
         
         loader = WanVideoModelLoader()
         wan_model_patcher = loader.loadmodel(
