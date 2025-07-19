@@ -1602,18 +1602,34 @@ class WanVideoMultiGPULoader:
                 if compile_args["compile_transformer_blocks_only"]:
                     log.info("Compiling individual transformer blocks")
                     for i, block in enumerate(target_model.blocks):
-                        target_model.blocks[i] = torch.compile(block, 
-                            fullgraph=compile_args["fullgraph"], 
-                            dynamic=compile_args["dynamic"], 
-                            backend=compile_args["backend"], 
-                            mode=compile_args["mode"])
-                    if hasattr(target_model, 'vace_blocks') and target_model.vace_blocks is not None:
-                        for i, block in enumerate(target_model.vace_blocks):
-                            target_model.vace_blocks[i] = torch.compile(block,
+                        try:
+                            # Skip compilation for blocks that have known torch.compile issues
+                            if hasattr(block, 'get_mod'):
+                                log.info(f"Skipping compilation for block {i} due to modulation attribute issues")
+                                continue
+                            target_model.blocks[i] = torch.compile(block, 
                                 fullgraph=compile_args["fullgraph"], 
                                 dynamic=compile_args["dynamic"], 
                                 backend=compile_args["backend"], 
                                 mode=compile_args["mode"])
+                        except Exception as e:
+                            log.warning(f"Failed to compile block {i}: {e}, skipping this block")
+                            continue
+                    if hasattr(target_model, 'vace_blocks') and target_model.vace_blocks is not None:
+                        for i, block in enumerate(target_model.vace_blocks):
+                            try:
+                                # Skip compilation for blocks that have known torch.compile issues
+                                if hasattr(block, 'get_mod'):
+                                    log.info(f"Skipping compilation for vace_block {i} due to modulation attribute issues")
+                                    continue
+                                target_model.vace_blocks[i] = torch.compile(block,
+                                    fullgraph=compile_args["fullgraph"], 
+                                    dynamic=compile_args["dynamic"], 
+                                    backend=compile_args["backend"], 
+                                    mode=compile_args["mode"])
+                            except Exception as e:
+                                log.warning(f"Failed to compile vace_block {i}: {e}, skipping this block")
+                                continue
                     log.info("Individual block compilation completed successfully")
                 else:
                     log.info("Compiling entire diffusion model")
