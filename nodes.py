@@ -34,7 +34,9 @@ try:
         DistriFusionWanVideoModelLoader,
         DistriFusionWanVideoSampler,
         DistriFusionSetup,
-        DistriFusionStatus
+        DistriFusionStatus,
+        DistriFusionModelLoader,
+        DistriFusionDistributionConfig
     )
     DISTRIFUSION_AVAILABLE = True
 except ImportError as e:
@@ -2951,7 +2953,18 @@ NODE_CLASS_MAPPINGS = {
     "WanVideoMiniMaxRemoverEmbeds": WanVideoMiniMaxRemoverEmbeds,
     "WanVideoFreeInitArgs": WanVideoFreeInitArgs,
     "WanVideoSetRadialAttention": WanVideoSetRadialAttention,
-    }
+}
+
+# Add DistriFusion nodes if available
+if DISTRIFUSION_AVAILABLE:
+    NODE_CLASS_MAPPINGS.update({
+        "DistriFusionModelLoader": DistriFusionModelLoader,
+        "DistriFusionDistributionConfig": DistriFusionDistributionConfig,
+        "DistriFusionWanVideoModelLoader": DistriFusionWanVideoModelLoader,
+        "DistriFusionWanVideoSampler": DistriFusionWanVideoSampler,
+        "DistriFusionSetup": DistriFusionSetup,
+        "DistriFusionStatus": DistriFusionStatus,
+    })
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
     "WanVideoDecode": "WanVideo Decode",
@@ -2978,4 +2991,15 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoMiniMaxRemoverEmbeds": "WanVideo MiniMax Remover Embeds",
     "WanVideoFreeInitArgs": "WanVideo Free Init Args",
     "WanVideoSetRadialAttention": "WanVideo Set Radial Attention"
-    }
+}
+
+# Add DistriFusion display names if available  
+if DISTRIFUSION_AVAILABLE:
+    NODE_DISPLAY_NAME_MAPPINGS.update({
+        "DistriFusionModelLoader": "DistriFusion Model Loader",
+        "DistriFusionDistributionConfig": "DistriFusion Distribution Config",
+        "DistriFusionWanVideoModelLoader": "DistriFusion WanVideo Model Loader (Legacy)",
+        "DistriFusionWanVideoSampler": "DistriFusion WanVideo Sampler", 
+        "DistriFusionSetup": "DistriFusion Setup",
+        "DistriFusionStatus": "DistriFusion Status",
+    })
