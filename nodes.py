@@ -2363,7 +2363,7 @@ class WanVideoSampler:
                         if cache_args is not None:
                             self.window_tracker.cache_states[window_id] = new_teacache
 
-                                                window_mask = create_window_mask(noise_pred_context, c, latent_video_length, context_overlap, looped=is_looped, window_type=context_options["fuse_method"])
+                        window_mask = create_window_mask(noise_pred_context, c, latent_video_length, context_overlap, looped=is_looped, window_type=context_options["fuse_method"])
                         
                         # Handle DataParallel batch size mismatch
                         if noise_pred_context.shape[0] != noise_pred.shape[0]:
