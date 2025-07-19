@@ -9,11 +9,11 @@ import torch.distributed as dist
 from typing import Dict, List, Optional, Tuple, Any, Union
 import threading
 import time
-from ..wanvideo.modules.model import WanModel
+from wanvideo.modules.model import WanModel
 from .patch_manager import PatchManager, PatchConfig, PatchSplitMode
 from .communication import AsyncPatchCommunicator, DistributedManager
 import comfy.model_management as mm
-from ..utils import log
+from utils import log
 
 
 class DistriFusionWanModel(nn.Module):

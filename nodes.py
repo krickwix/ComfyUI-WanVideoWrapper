@@ -29,7 +29,20 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from .wanvideo.modules.model import rope_params
 
 # DistriFusion imports for distributed inference
+DISTRIFUSION_AVAILABLE = False
+DistriFusionWanVideoModelLoader = None
+DistriFusionWanVideoSampler = None
+DistriFusionSetup = None
+DistriFusionStatus = None
+DistriFusionModelLoader = None
+DistriFusionDistributionConfig = None
+
 try:
+    # Check for required dependencies first
+    import torch
+    import torch.distributed
+    
+    # Then try importing DistriFusion modules
     from .distrifusion import (
         DistriFusionWanVideoModelLoader,
         DistriFusionWanVideoSampler,
@@ -39,8 +52,15 @@ try:
         DistriFusionDistributionConfig
     )
     DISTRIFUSION_AVAILABLE = True
+    print("✅ DistriFusion nodes loaded successfully")
+    
 except ImportError as e:
-    print(f"DistriFusion not available: {e}")
+    print(f"⚠️ DistriFusion not available: {e}")
+    print("   This is normal if PyTorch or other dependencies are not installed.")
+    print("   DistriFusion nodes will not appear in the node list.")
+    DISTRIFUSION_AVAILABLE = False
+except Exception as e:
+    print(f"⚠️ DistriFusion import error: {e}")
     DISTRIFUSION_AVAILABLE = False
 
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps
@@ -2957,14 +2977,24 @@ NODE_CLASS_MAPPINGS = {
 
 # Add DistriFusion nodes if available
 if DISTRIFUSION_AVAILABLE:
-    NODE_CLASS_MAPPINGS.update({
-        "DistriFusionModelLoader": DistriFusionModelLoader,
-        "DistriFusionDistributionConfig": DistriFusionDistributionConfig,
-        "DistriFusionWanVideoModelLoader": DistriFusionWanVideoModelLoader,
-        "DistriFusionWanVideoSampler": DistriFusionWanVideoSampler,
-        "DistriFusionSetup": DistriFusionSetup,
-        "DistriFusionStatus": DistriFusionStatus,
-    })
+    distrifusion_nodes = {}
+    
+    # Only add nodes that are actually imported successfully
+    if DistriFusionModelLoader is not None:
+        distrifusion_nodes["DistriFusionModelLoader"] = DistriFusionModelLoader
+    if DistriFusionDistributionConfig is not None:
+        distrifusion_nodes["DistriFusionDistributionConfig"] = DistriFusionDistributionConfig
+    if DistriFusionWanVideoModelLoader is not None:
+        distrifusion_nodes["DistriFusionWanVideoModelLoader"] = DistriFusionWanVideoModelLoader
+    if DistriFusionWanVideoSampler is not None:
+        distrifusion_nodes["DistriFusionWanVideoSampler"] = DistriFusionWanVideoSampler
+    if DistriFusionSetup is not None:
+        distrifusion_nodes["DistriFusionSetup"] = DistriFusionSetup
+    if DistriFusionStatus is not None:
+        distrifusion_nodes["DistriFusionStatus"] = DistriFusionStatus
+    
+    NODE_CLASS_MAPPINGS.update(distrifusion_nodes)
+    print(f"📝 Registered {len(distrifusion_nodes)} DistriFusion nodes")
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoSampler": "WanVideo Sampler",
     "WanVideoDecode": "WanVideo Decode",
@@ -2995,11 +3025,21 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 # Add DistriFusion display names if available  
 if DISTRIFUSION_AVAILABLE:
-    NODE_DISPLAY_NAME_MAPPINGS.update({
-        "DistriFusionModelLoader": "DistriFusion Model Loader",
-        "DistriFusionDistributionConfig": "DistriFusion Distribution Config",
-        "DistriFusionWanVideoModelLoader": "DistriFusion WanVideo Model Loader (Legacy)",
-        "DistriFusionWanVideoSampler": "DistriFusion WanVideo Sampler", 
-        "DistriFusionSetup": "DistriFusion Setup",
-        "DistriFusionStatus": "DistriFusion Status",
-    })
+    distrifusion_display_names = {}
+    
+    # Only add display names for nodes that are actually available
+    if DistriFusionModelLoader is not None:
+        distrifusion_display_names["DistriFusionModelLoader"] = "DistriFusion Model Loader"
+    if DistriFusionDistributionConfig is not None:
+        distrifusion_display_names["DistriFusionDistributionConfig"] = "DistriFusion Distribution Config"
+    if DistriFusionWanVideoModelLoader is not None:
+        distrifusion_display_names["DistriFusionWanVideoModelLoader"] = "DistriFusion WanVideo Model Loader (Legacy)"
+    if DistriFusionWanVideoSampler is not None:
+        distrifusion_display_names["DistriFusionWanVideoSampler"] = "DistriFusion WanVideo Sampler"
+    if DistriFusionSetup is not None:
+        distrifusion_display_names["DistriFusionSetup"] = "DistriFusion Setup"
+    if DistriFusionStatus is not None:
+        distrifusion_display_names["DistriFusionStatus"] = "DistriFusion Status"
+    
+    NODE_DISPLAY_NAME_MAPPINGS.update(distrifusion_display_names)
+    print(f"📝 Registered {len(distrifusion_display_names)} DistriFusion display names")

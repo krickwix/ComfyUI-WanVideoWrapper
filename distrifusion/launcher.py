@@ -10,7 +10,7 @@ import argparse
 import torch
 import signal
 from typing import List, Optional
-from ..utils import log
+from utils import log
 
 
 class DistriFusionLauncher:

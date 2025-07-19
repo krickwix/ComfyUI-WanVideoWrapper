@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
 from enum import Enum
 import comfy.model_management as mm
-from ..utils import log
+from utils import log
 
 
 class PatchSplitMode(Enum):

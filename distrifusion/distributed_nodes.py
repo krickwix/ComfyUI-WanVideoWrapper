@@ -8,9 +8,9 @@ import os
 import folder_paths
 import comfy.model_management as mm
 from comfy.utils import load_torch_file
-from ..utils import log
-from ..nodes_model_loading import WanVideoModelLoader
-from ..nodes import WanVideoSampler
+from utils import log
+from nodes_model_loading import WanVideoModelLoader
+from nodes import WanVideoSampler
 from .distrifusion_wrapper import DistriFusionWanModel, create_distrifusion_model
 from .patch_manager import PatchConfig, PatchSplitMode
 from typing import Dict, Any, Tuple, List, Optional

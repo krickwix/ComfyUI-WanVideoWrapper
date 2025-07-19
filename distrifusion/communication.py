@@ -12,7 +12,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 import comfy.model_management as mm
-from ..utils import log
+from utils import log
 
 
 class AsyncPatchCommunicator:

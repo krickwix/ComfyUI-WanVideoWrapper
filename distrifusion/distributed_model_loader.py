@@ -8,8 +8,8 @@ import torch.distributed as dist
 import os
 import folder_paths
 import comfy.model_management as mm
-from ..utils import log
-from ..nodes_model_loading import WanVideoModelLoader
+from utils import log
+from nodes_model_loading import WanVideoModelLoader
 from .distrifusion_wrapper import create_distrifusion_model
 from .patch_manager import PatchConfig, PatchSplitMode
 from .communication import DistributedManager
