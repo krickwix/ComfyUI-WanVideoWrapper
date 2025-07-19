@@ -2053,12 +2053,36 @@ class WanModel(ModelMixin, ConfigMixin):
                 if hasattr(self, 'block_device_map') and self.block_device_map:
                     # Pipeline parallelism mode - move data to block's device
                     target_device = self.block_device_map.get(b, self.main_device)
+                    
+                    # Ensure the block itself is on the target device
+                    if str(next(block.parameters()).device) != target_device:
+                        block.to(target_device)
+                    
                     if str(x.device) != target_device:
                         x = x.to(target_device, non_blocking=True)
-                        # Also move kwargs tensors to the same device
+                        
+                        # Move ALL kwargs tensors to the same device
                         for key, value in kwargs.items():
                             if hasattr(value, 'to') and hasattr(value, 'device'):
                                 kwargs[key] = value.to(target_device, non_blocking=True)
+                            elif isinstance(value, (list, tuple)):
+                                # Handle lists/tuples of tensors
+                                new_value = []
+                                for item in value:
+                                    if hasattr(item, 'to') and hasattr(item, 'device'):
+                                        new_value.append(item.to(target_device, non_blocking=True))
+                                    else:
+                                        new_value.append(item)
+                                kwargs[key] = type(value)(new_value)
+                            elif isinstance(value, dict):
+                                # Handle dictionaries with tensors
+                                new_dict = {}
+                                for k, v in value.items():
+                                    if hasattr(v, 'to') and hasattr(v, 'device'):
+                                        new_dict[k] = v.to(target_device, non_blocking=True)
+                                    else:
+                                        new_dict[k] = v
+                                kwargs[key] = new_dict
                 
                 # Handle multi-GPU block movement (block swap mode)
                 elif self.parallel_devices and len(self.parallel_devices) > 1:
