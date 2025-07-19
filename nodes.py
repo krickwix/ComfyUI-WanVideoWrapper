@@ -4,10 +4,42 @@ import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 import inspect
+import io
+import base64
+import folder_paths
+import nodes
+import torch
+import time
+import math
+import torchvision
+import random
+import gc
+import numpy as np
+from PIL import Image
+import json
+import os
+import comfy
+import comfy.model_management as mm
+from comfy.k_diffusion.sampling import BrownianTreeNoiseSampler
+import comfy.utils
+import comfy.latent_formats
 
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 
 from .wanvideo.modules.model import rope_params
+
+# DistriFusion imports for distributed inference
+try:
+    from .distrifusion import (
+        DistriFusionWanVideoModelLoader,
+        DistriFusionWanVideoSampler,
+        DistriFusionSetup,
+        DistriFusionStatus
+    )
+    DISTRIFUSION_AVAILABLE = True
+except ImportError as e:
+    print(f"DistriFusion not available: {e}")
+    DISTRIFUSION_AVAILABLE = False
 
 from .wanvideo.schedulers import get_scheduler, get_sampling_sigmas, retrieve_timesteps
 
