@@ -1385,7 +1385,33 @@ class WanVideoMultiGPULoader:
                 log.info("For WanVideo models, block distribution often outperforms DataParallel")
                 log.info("Consider using parallelism_type='block_distribution' for better performance")
             
-            if parallelism_type == "data_parallel":
+            # Apply parallelism strategy with proper precedence
+            parallelism_applied = False
+            
+            if parallelism_type == "block_distribution" and enable_block_distribution:
+                # Block distribution has highest priority for WanVideo
+                log.info("Applying block distribution across GPUs (OPTIMAL for WanVideo)")
+                log.info("This distributes transformer blocks across GPUs for pipeline parallelism")
+                log.info("SKIPPING DataParallel - using pure pipeline parallelism instead")
+                
+                # Report model structure for optimal distribution
+                if hasattr(transformer, 'blocks'):
+                    num_blocks = len(transformer.blocks)
+                    blocks_per_gpu = num_blocks // len(gpu_id_list)
+                    log.info(f"Distributing {num_blocks} transformer blocks across {len(gpu_id_list)} GPUs")
+                    log.info(f"Approximately {blocks_per_gpu} blocks per GPU")
+                
+                from .wanvideo.modules.model import distribute_model_blocks
+                distribute_model_blocks(transformer, gpu_id_list)
+                
+                # Set model to use block distribution WITHOUT DataParallel wrapper
+                transformer.parallel_devices = [torch.device(f'cuda:{gpu_id}') for gpu_id in gpu_id_list]
+                patcher.model.diffusion_model = transformer  # Direct assignment, no DataParallel
+                log.info("Block distribution provides pipeline parallelism with lower memory overhead")
+                log.info(f"Pipeline parallelism active: GPU 0 -> GPU {len(gpu_id_list)-1}")
+                parallelism_applied = True
+                
+            elif parallelism_type == "data_parallel":
                 log.info("Applying DataParallel to WanVideo model")
                 try:
                     # Set NCCL environment variables for better stability
@@ -1511,23 +1537,7 @@ class WanVideoMultiGPULoader:
                             transformer.to(f'cuda:{gpu_id_list[0]}')
                             patcher.model.diffusion_model = transformer
             
-            elif parallelism_type == "block_distribution" and enable_block_distribution:
-                log.info("Applying block distribution across GPUs (OPTIMAL for WanVideo)")
-                log.info("This distributes transformer blocks across GPUs for pipeline parallelism")
-                
-                # Report model structure for optimal distribution
-                if hasattr(transformer, 'blocks'):
-                    num_blocks = len(transformer.blocks)
-                    blocks_per_gpu = num_blocks // len(gpu_id_list)
-                    log.info(f"Distributing {num_blocks} transformer blocks across {len(gpu_id_list)} GPUs")
-                    log.info(f"Approximately {blocks_per_gpu} blocks per GPU")
-                
-                from .wanvideo.modules.model import distribute_model_blocks
-                distribute_model_blocks(transformer, gpu_id_list)
-                
-                # Set model to use block distribution
-                transformer.parallel_devices = [torch.device(f'cuda:{gpu_id}') for gpu_id in gpu_id_list]
-                log.info("Block distribution provides pipeline parallelism with lower memory overhead")
+
             
             elif parallelism_type == "distributed":
                 log.info("DistributedDataParallel setup - requires proper DDP initialization")
@@ -1557,7 +1567,10 @@ class WanVideoMultiGPULoader:
                     patcher.model.diffusion_model = transformer
                     log.info(f"Single GPU mode on GPU {gpu_id_list[0]}")
             
-            log.info(f"Multi-GPU parallelism applied: {parallelism_type} on GPUs {gpu_id_list}")
+            if parallelism_applied:
+                log.info(f"Multi-GPU parallelism applied: {parallelism_type} on GPUs {gpu_id_list}")
+            else:
+                log.warning(f"No parallelism applied - check configuration: {parallelism_type}")
             
             # Add performance monitoring helper
             if len(gpu_id_list) > 1:
