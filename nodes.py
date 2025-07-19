@@ -2363,7 +2363,21 @@ class WanVideoSampler:
                         if cache_args is not None:
                             self.window_tracker.cache_states[window_id] = new_teacache
 
-                        window_mask = create_window_mask(noise_pred_context, c, latent_video_length, context_overlap, looped=is_looped, window_type=context_options["fuse_method"])                    
+                                                window_mask = create_window_mask(noise_pred_context, c, latent_video_length, context_overlap, looped=is_looped, window_type=context_options["fuse_method"])
+                        
+                        # Handle DataParallel batch size mismatch
+                        if noise_pred_context.shape[0] != noise_pred.shape[0]:
+                            # DataParallel may return different batch size, ensure compatibility
+                            if noise_pred_context.shape[0] < noise_pred.shape[0]:
+                                # Expand noise_pred_context to match expected batch size
+                                batch_repeat = noise_pred.shape[0] // noise_pred_context.shape[0]
+                                noise_pred_context = noise_pred_context.repeat(batch_repeat, 1, 1, 1, 1)
+                                window_mask = window_mask.repeat(batch_repeat, 1, 1, 1, 1) if window_mask.shape[0] != noise_pred.shape[0] else window_mask
+                            else:
+                                # Take only the needed portion if noise_pred_context is larger
+                                noise_pred_context = noise_pred_context[:noise_pred.shape[0]]
+                                window_mask = window_mask[:noise_pred.shape[0]] if window_mask.shape[0] != noise_pred.shape[0] else window_mask
+                        
                         noise_pred[:, c] += noise_pred_context * window_mask
                         counter[:, c] += window_mask
                         context_pbar.update_absolute(step_start_progress + (i + 1) * fraction_per_context, steps)
