@@ -1380,6 +1380,11 @@ class WanVideoMultiGPULoader:
             transformer.enable_block_distribution = enable_block_distribution
             
             # Apply the parallelism strategy
+            # For WanVideo, block distribution often performs better than DataParallel
+            if parallelism_type == "data_parallel" and len(gpu_id_list) > 1:
+                log.info("For WanVideo models, block distribution often outperforms DataParallel")
+                log.info("Consider using parallelism_type='block_distribution' for better performance")
+            
             if parallelism_type == "data_parallel":
                 log.info("Applying DataParallel to WanVideo model")
                 try:
@@ -1507,9 +1512,22 @@ class WanVideoMultiGPULoader:
                             patcher.model.diffusion_model = transformer
             
             elif parallelism_type == "block_distribution" and enable_block_distribution:
-                log.info("Applying block distribution across GPUs")
+                log.info("Applying block distribution across GPUs (OPTIMAL for WanVideo)")
+                log.info("This distributes transformer blocks across GPUs for pipeline parallelism")
+                
+                # Report model structure for optimal distribution
+                if hasattr(transformer, 'blocks'):
+                    num_blocks = len(transformer.blocks)
+                    blocks_per_gpu = num_blocks // len(gpu_id_list)
+                    log.info(f"Distributing {num_blocks} transformer blocks across {len(gpu_id_list)} GPUs")
+                    log.info(f"Approximately {blocks_per_gpu} blocks per GPU")
+                
                 from .wanvideo.modules.model import distribute_model_blocks
                 distribute_model_blocks(transformer, gpu_id_list)
+                
+                # Set model to use block distribution
+                transformer.parallel_devices = [torch.device(f'cuda:{gpu_id}') for gpu_id in gpu_id_list]
+                log.info("Block distribution provides pipeline parallelism with lower memory overhead")
             
             elif parallelism_type == "distributed":
                 log.info("DistributedDataParallel setup - requires proper DDP initialization")
@@ -1540,6 +1558,16 @@ class WanVideoMultiGPULoader:
                     log.info(f"Single GPU mode on GPU {gpu_id_list[0]}")
             
             log.info(f"Multi-GPU parallelism applied: {parallelism_type} on GPUs {gpu_id_list}")
+            
+            # Add performance monitoring helper
+            if len(gpu_id_list) > 1:
+                log.info("=== MULTI-GPU PERFORMANCE TIPS ===")
+                log.info("1. Monitor GPU utilization: watch -n 1 nvidia-smi")
+                log.info("2. Check for GPU 0 bottleneck in DataParallel mode")
+                log.info("3. For transformer models, block_distribution often performs better")
+                log.info("4. Ensure sufficient batch size or sequence length for parallelism")
+                log.info("5. Watch for memory transfer bottlenecks between GPUs")
+                log.info("======================================")
         
         return result
 
