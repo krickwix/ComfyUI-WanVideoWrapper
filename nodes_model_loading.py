@@ -1416,10 +1416,60 @@ class WanVideoMultiGPULoader:
                         test_tensor = torch.zeros(1).to(f'cuda:{gpu_id}')
                         del test_tensor
                     
-                    # WanVideo models have complex input structures that don't work well with DataParallel
-                    # Skip DataParallel and use manual distribution instead
-                    log.warning("WanVideo models have complex inputs - using manual parallelism instead of DataParallel")
-                    raise Exception("Falling back to manual parallelism for WanVideo compatibility")
+                    # Apply DataParallel with proper input/output handling for WanVideo
+                    class WanVideoDataParallel(nn.DataParallel):
+                        def scatter(self, inputs, kwargs, device_ids):
+                            # Custom scatter that properly handles WanVideo inputs
+                            # For WanVideo, we don't want to automatically scatter inputs
+                            # Instead, create the same inputs for each GPU
+                            scattered_inputs = []
+                            scattered_kwargs = []
+                            
+                            for device_id in device_ids:
+                                device = f'cuda:{device_id}'
+                                
+                                # Move inputs to each device
+                                device_inputs = []
+                                for inp in inputs:
+                                    if hasattr(inp, 'to'):
+                                        device_inputs.append(inp.to(device))
+                                    elif isinstance(inp, (list, tuple)):
+                                        # Handle lists/tuples of tensors
+                                        device_inputs.append([
+                                            x.to(device) if hasattr(x, 'to') else x 
+                                            for x in inp
+                                        ])
+                                    else:
+                                        device_inputs.append(inp)
+                                
+                                # Move kwargs to each device
+                                device_kwargs = {}
+                                for k, v in kwargs.items():
+                                    if hasattr(v, 'to'):
+                                        device_kwargs[k] = v.to(device)
+                                    elif isinstance(v, (list, tuple)):
+                                        device_kwargs[k] = [
+                                            x.to(device) if hasattr(x, 'to') else x 
+                                            for x in v
+                                        ]
+                                    else:
+                                        device_kwargs[k] = v
+                                
+                                scattered_inputs.append(tuple(device_inputs))
+                                scattered_kwargs.append(device_kwargs)
+                            
+                            return scattered_inputs, scattered_kwargs
+                        
+                        def forward(self, *inputs, **kwargs):
+                            # Use single GPU if only one available
+                            if len(self.device_ids) == 1:
+                                return self.module(*inputs, **kwargs)
+                            
+                            # For multi-GPU, use custom scatter
+                            return super().forward(*inputs, **kwargs)
+                    
+                    patcher.model.diffusion_model = WanVideoDataParallel(transformer, device_ids=gpu_id_list)
+                    log.info(f"WanVideoDataParallel with custom scatter applied on GPUs: {gpu_id_list}")
                     
                 except Exception as e:
                     log.warning(f"DataParallel failed with error: {e}")
