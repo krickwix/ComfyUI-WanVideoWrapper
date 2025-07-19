@@ -567,6 +567,7 @@ class WanVideoModelLoader:
                 "vace_model": ("VACEPATH", {"default": None, "tooltip": "VACE model to use when not using model that has it included"}),
                 "fantasytalking_model": ("FANTASYTALKINGMODEL", {"default": None, "tooltip": "FantasyTalking model https://github.com/Fantasy-AMAP"}),
                 "multitalk_model": ("MULTITALKMODEL", {"default": None, "tooltip": "Multitalk model"}),
+                "batch_optimization": ("BATCHOPTIMIZATION", {"default": None, "tooltip": "Batch size optimization for multi-GPU performance"}),
             }
         }
 
@@ -1580,14 +1581,62 @@ class WanVideoMultiGPULoader:
                 log.info("3. For transformer models, block_distribution often performs better")
                 log.info("4. Ensure sufficient batch size or sequence length for parallelism")
                 log.info("5. Watch for memory transfer bottlenecks between GPUs")
+                log.info("6. BATCH SIZE OPTIMIZATION:")
+                log.info(f"   - For DataParallel: Use batch_size >= {len(gpu_id_list)} for best GPU utilization")
+                log.info(f"   - For Block Distribution: Larger batches improve pipeline throughput")
+                log.info("   - Try multiple prompts or longer sequences for better parallelism")
                 log.info("======================================")
         
         return result
+
+class WanVideoBatchOptimization:
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "strategy": (["auto", "manual", "disabled"], {"default": "auto", "tooltip": "Batch optimization strategy"}),
+                "target_batch_size": ("INT", {"default": 8, "min": 1, "max": 32, "tooltip": "Target batch size for multi-GPU parallelism"}),
+                "enable_sequence_batching": ("BOOLEAN", {"default": True, "tooltip": "Enable batching of sequence chunks"}),
+                "enable_prompt_batching": ("BOOLEAN", {"default": True, "tooltip": "Enable batching multiple prompts"}),
+            },
+            "optional": {
+                "max_memory_per_gpu": ("FLOAT", {"default": 40.0, "min": 4.0, "max": 80.0, "tooltip": "Maximum memory per GPU in GB"}),
+                "chunk_size": ("INT", {"default": 30, "min": 8, "max": 120, "tooltip": "Sequence chunk size for batching"}),
+            }
+        }
+
+    RETURN_TYPES = ("BATCHOPTIMIZATION",)
+    RETURN_NAMES = ("batch_optimization",)
+    FUNCTION = "create_batch_config"
+    CATEGORY = "WanVideoWrapper/MultiGPU"
+
+    def create_batch_config(self, strategy, target_batch_size, enable_sequence_batching, enable_prompt_batching, max_memory_per_gpu=40.0, chunk_size=30):
+        config = {
+            "strategy": strategy,
+            "target_batch_size": target_batch_size,
+            "enable_sequence_batching": enable_sequence_batching,
+            "enable_prompt_batching": enable_prompt_batching,
+            "max_memory_per_gpu": max_memory_per_gpu,
+            "chunk_size": chunk_size,
+        }
+        
+        log.info(f"Batch Optimization Config: {config}")
+        
+        if strategy == "auto":
+            import torch
+            if torch.cuda.is_available():
+                num_gpus = torch.cuda.device_count()
+                log.info(f"Auto-optimization for {num_gpus} GPUs")
+                config["recommended_batch_size"] = max(num_gpus, target_batch_size)
+                log.info(f"Recommended batch size: {config['recommended_batch_size']}")
+        
+        return (config,)
 
 NODE_CLASS_MAPPINGS = {
     "WanVideoModelLoader": WanVideoModelLoader,
     "WanVideoVAELoader": WanVideoVAELoader,
     "WanVideoLoraSelect": WanVideoLoraSelect,
+    "WanVideoBatchOptimization": WanVideoBatchOptimization,
     "WanVideoLoraBlockEdit": WanVideoLoraBlockEdit,
     "WanVideoTinyVAELoader": WanVideoTinyVAELoader,
     "WanVideoVACEModelSelect": WanVideoVACEModelSelect,
@@ -1613,5 +1662,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanVideoTorchCompileSettings": "WanVideo Torch Compile Settings",
     "LoadWanVideoT5TextEncoder": "WanVideo T5 Text Encoder Loader",
     "LoadWanVideoClipTextEncoder": "WanVideo CLIP Text Encoder Loader",
-    "WanVideoMultiGPULoader": "WanVideo Multi-GPU Loader",
-    }
+        "WanVideoMultiGPULoader": "WanVideo Multi-GPU Loader",
+    "WanVideoBatchOptimization": "WanVideo Batch Optimization",
+}
