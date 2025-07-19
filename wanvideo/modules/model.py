@@ -160,15 +160,29 @@ def apply_rope_comfy(xq, xk, freqs_cis):
     """Apply RoPE (Rotary Position Embedding) to query and key tensors"""
     seq_dim = 1
     
-    # Apply rotation to xq
-    xq_chunk = xq.to(dtype=freqs_cis.dtype).reshape(*xq.shape[:-1], -1, 1, 2)
-    xq_out = (freqs_cis[..., 0] * xq_chunk[..., 0] + 
-              freqs_cis[..., 1] * xq_chunk[..., 1]).reshape(*xq.shape).type_as(xq)
-    
-    # Apply rotation to xk
-    xk_chunk = xk.to(dtype=freqs_cis.dtype).reshape(*xk.shape[:-1], -1, 1, 2)
-    xk_out = (freqs_cis[..., 0] * xk_chunk[..., 0] + 
-              freqs_cis[..., 1] * xk_chunk[..., 1]).reshape(*xk.shape).type_as(xk)
+    # Handle the case where freqs_cis has 2x2 rotation matrices from rope_riflex
+    if freqs_cis.dim() > 3 and freqs_cis.shape[-1] == 2 and freqs_cis.shape[-2] == 2:
+        # freqs_cis shape: [..., dim//2, 2, 2] - rotation matrices
+        # Reshape query and key tensors to work with rotation matrices
+        xq_reshaped = xq.to(dtype=freqs_cis.dtype).reshape(*xq.shape[:-1], -1, 2)
+        xk_reshaped = xk.to(dtype=freqs_cis.dtype).reshape(*xk.shape[:-1], -1, 2)
+        
+        # Apply rotation matrices: [x', y'] = R @ [x, y]
+        # freqs_cis[..., :, :] is the 2x2 rotation matrix
+        xq_out = torch.einsum('...ij,...j->...i', freqs_cis, xq_reshaped).reshape(*xq.shape).type_as(xq)
+        xk_out = torch.einsum('...ij,...j->...i', freqs_cis, xk_reshaped).reshape(*xk.shape).type_as(xk)
+        
+    else:
+        # Original cos/sin format: freqs_cis shape: [..., 2]
+        # Apply rotation to xq
+        xq_chunk = xq.to(dtype=freqs_cis.dtype).reshape(*xq.shape[:-1], -1, 1, 2)
+        xq_out = (freqs_cis[..., 0] * xq_chunk[..., 0] + 
+                  freqs_cis[..., 1] * xq_chunk[..., 1]).reshape(*xq.shape).type_as(xq)
+        
+        # Apply rotation to xk
+        xk_chunk = xk.to(dtype=freqs_cis.dtype).reshape(*xk.shape[:-1], -1, 1, 2)
+        xk_out = (freqs_cis[..., 0] * xk_chunk[..., 0] + 
+                  freqs_cis[..., 1] * xk_chunk[..., 1]).reshape(*xk.shape).type_as(xk)
     
     return xq_out, xk_out
 
@@ -184,6 +198,9 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
     chunk_sizes = [seq_len // num_chunks + (1 if i < seq_len % num_chunks else 0) 
                   for i in range(num_chunks)]
     
+    # Check if we have rotation matrices or cos/sin format
+    use_rotation_matrices = freqs_cis.dim() > 3 and freqs_cis.shape[-1] == 2 and freqs_cis.shape[-2] == 2
+    
     # First pass: process xq completely
     start_idx = 0
     for size in chunk_sizes:
@@ -198,11 +215,18 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
         freqs_chunk = freqs_cis[tuple(freq_slices)]
         
         xq_chunk = xq[tuple(slices)]
-        xq_chunk_ = xq_chunk.to(dtype=freqs_cis.dtype).reshape(*xq_chunk.shape[:-1], -1, 1, 2)
-        xq_out[tuple(slices)] = (freqs_chunk[..., 0] * xq_chunk_[..., 0] + 
-                                freqs_chunk[..., 1] * xq_chunk_[..., 1]).reshape(*xq_chunk.shape).type_as(xq)
         
-        del xq_chunk, xq_chunk_, freqs_chunk
+        if use_rotation_matrices:
+            # Handle rotation matrix format
+            xq_reshaped = xq_chunk.to(dtype=freqs_cis.dtype).reshape(*xq_chunk.shape[:-1], -1, 2)
+            xq_out[tuple(slices)] = torch.einsum('...ij,...j->...i', freqs_chunk, xq_reshaped).reshape(*xq_chunk.shape).type_as(xq)
+        else:
+            # Handle cos/sin format
+            xq_chunk_ = xq_chunk.to(dtype=freqs_cis.dtype).reshape(*xq_chunk.shape[:-1], -1, 1, 2)
+            xq_out[tuple(slices)] = (freqs_chunk[..., 0] * xq_chunk_[..., 0] + 
+                                    freqs_chunk[..., 1] * xq_chunk_[..., 1]).reshape(*xq_chunk.shape).type_as(xq)
+        
+        del xq_chunk, freqs_chunk
         start_idx = end_idx
     
     # Second pass: process xk completely
@@ -219,11 +243,18 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
         freqs_chunk = freqs_cis[tuple(freq_slices)]
         
         xk_chunk = xk[tuple(slices)]
-        xk_chunk_ = xk_chunk.to(dtype=freqs_cis.dtype).reshape(*xk_chunk.shape[:-1], -1, 1, 2)
-        xk_out[tuple(slices)] = (freqs_chunk[..., 0] * xk_chunk_[..., 0] + 
-                                freqs_chunk[..., 1] * xk_chunk_[..., 1]).reshape(*xk_chunk.shape).type_as(xk)
         
-        del xk_chunk, xk_chunk_, freqs_chunk
+        if use_rotation_matrices:
+            # Handle rotation matrix format
+            xk_reshaped = xk_chunk.to(dtype=freqs_cis.dtype).reshape(*xk_chunk.shape[:-1], -1, 2)
+            xk_out[tuple(slices)] = torch.einsum('...ij,...j->...i', freqs_chunk, xk_reshaped).reshape(*xk_chunk.shape).type_as(xk)
+        else:
+            # Handle cos/sin format
+            xk_chunk_ = xk_chunk.to(dtype=freqs_cis.dtype).reshape(*xk_chunk.shape[:-1], -1, 1, 2)
+            xk_out[tuple(slices)] = (freqs_chunk[..., 0] * xk_chunk_[..., 0] + 
+                                    freqs_chunk[..., 1] * xk_chunk_[..., 1]).reshape(*xk_chunk.shape).type_as(xk)
+        
+        del xk_chunk, freqs_chunk
         start_idx = end_idx
     
     return xq_out, xk_out
