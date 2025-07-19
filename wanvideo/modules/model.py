@@ -887,10 +887,10 @@ class WanAttentionBlock(nn.Module):
         return e
     
     def modulate(self, x, shift_msa, scale_msa):
-        return torch.addcmul(shift_msa, x, 1 + scale_msa)
+        return torch.addcmul(shift_msa.to(x.dtype), x, 1 + scale_msa.to(x.dtype))
     
     def ffn_chunked(self, x, shift_mlp, scale_mlp, num_chunks=4):
-        modulated_input = torch.addcmul(shift_mlp, self.norm2(x), 1 + scale_mlp)
+        modulated_input = torch.addcmul(shift_mlp.to(x.dtype), self.norm2(x), 1 + scale_mlp.to(x.dtype))
         
         result = torch.empty_like(x)
         seq_len = modulated_input.shape[1]
@@ -998,13 +998,14 @@ class WanAttentionBlock(nn.Module):
 
         # FETA
         if enhance_enabled:
-            y.mul_(feta_scores)
+            y.mul_(feta_scores.to(y.dtype))
 
         #ReCamMaster
         if camera_embed is not None:
             y = self.projector(y)        
 
-        x = x.addcmul(y, gate_msa)
+        # Ensure dtype consistency for autocast compatibility
+        x = x.addcmul(y.to(x.dtype), gate_msa.to(x.dtype))
 
         # cross-attention & ffn function
         
@@ -1022,8 +1023,8 @@ class WanAttentionBlock(nn.Module):
             if self.rope_func == "comfy_chunked":
                 y = self.ffn_chunked(x, shift_mlp, scale_mlp)
             else:
-                y = self.ffn(torch.addcmul(shift_mlp, self.norm2(x), 1 + scale_mlp))
-            x = x.addcmul(y, gate_mlp)
+                y = self.ffn(torch.addcmul(shift_mlp.to(x.dtype), self.norm2(x), 1 + scale_mlp.to(x.dtype)))
+            x = x.addcmul(y.to(x.dtype), gate_mlp.to(x.dtype))
 
         return x
 
@@ -1043,8 +1044,8 @@ class WanAttentionBlock(nn.Module):
             if self.rope_func == "comfy_chunked":
                 y = self.ffn_chunked(x, shift_mlp, scale_mlp)
             else:
-                y = self.ffn(torch.addcmul(shift_mlp, self.norm2(x), 1 + scale_mlp))
-            x = x.addcmul(y, gate_mlp)
+                y = self.ffn(torch.addcmul(shift_mlp.to(x.dtype), self.norm2(x), 1 + scale_mlp.to(x.dtype)))
+            x = x.addcmul(y.to(x.dtype), gate_mlp.to(x.dtype))
             return x
     
     @torch.compiler.disable()
@@ -1100,7 +1101,7 @@ class WanAttentionBlock(nn.Module):
         # Continue with FFN
         x = x + x_combined
         y = self.ffn_chunked(x, shift_mlp, scale_mlp)
-        x = x.addcmul(y, gate_mlp)
+        x = x.addcmul(y.to(x.dtype), gate_mlp.to(x.dtype))
         return x
 
 class VaceWanAttentionBlock(WanAttentionBlock):
@@ -1154,7 +1155,7 @@ class BaseWanAttentionBlock(WanAttentionBlock):
         
         if self.block_id is not None:
             for i in range(len(vace_hints)):
-                x.add_(vace_hints[i][self.block_id].to(x.device), alpha=vace_context_scale[i])
+                x.add_(vace_hints[i][self.block_id].to(x.device).to(x.dtype), alpha=vace_context_scale[i].to(x.dtype) if isinstance(vace_context_scale[i], torch.Tensor) else vace_context_scale[i])
         return x
 
 class Head(nn.Module):
@@ -1192,7 +1193,8 @@ class Head(nn.Module):
         """
 
         e = self.get_mod(e)
-        x = self.head(self.norm(x).mul_(1 + e[1]).add_(e[0]))
+        norm_x = self.norm(x)
+        x = self.head(norm_x.mul_(1 + e[1].to(norm_x.dtype)).add_(e[0].to(norm_x.dtype)))
         return x
 
 
