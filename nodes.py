@@ -1991,11 +1991,22 @@ class WanVideoSampler:
                 #batched
                 else:
                     cache_state_uncond = None
+                    # Prepare batched attn_cond: [attn_cond, attn_cond_neg]
+                    batched_attn_cond = None
+                    if attn_cond is not None or attn_cond_neg is not None:
+                        # Use attn_cond for conditional, attn_cond_neg (or attn_cond) for unconditional
+                        cond_part = attn_cond if attn_cond is not None else torch.zeros_like(attn_cond_neg) if attn_cond_neg is not None else None
+                        uncond_part = attn_cond_neg if attn_cond_neg is not None else attn_cond if attn_cond is not None else None
+                        if cond_part is not None and uncond_part is not None:
+                            batched_attn_cond = torch.cat([cond_part, uncond_part], dim=0)
+                    
                     [noise_pred_cond, noise_pred_uncond], cache_state_cond = transformer(
                         [z] + [z], context=positive_embeds + negative_embeds, 
                         y=[image_cond_input] + [image_cond_input] if image_cond_input is not None else None,
-                        clip_fea=clip_fea.repeat(2,1,1), is_uncond=False, current_step_percentage=current_step_percentage,
+                        clip_fea=clip_fea.repeat(2,1,1) if clip_fea is not None else None, 
+                        is_uncond=False, current_step_percentage=current_step_percentage,
                         pred_id=cache_state[0] if cache_state else None,
+                        vace_data=vace_data, attn_cond=batched_attn_cond,
                         **base_params
                     )
                 #cfg
