@@ -1021,22 +1021,9 @@ class WanVideoModelLoader:
                 compile_args = compile_args,
             )
 
-        #compile
-        if compile_args is not None and vram_management_args is None:
-            torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
-            try:
-                if hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'config'):
-                    torch._dynamo.config.recompile_limit = compile_args["dynamo_recompile_limit"]
-            except Exception as e:
-                log.warning(f"Could not set recompile_limit: {e}")
-            if compile_args["compile_transformer_blocks_only"]:
-                for i, block in enumerate(patcher.model.diffusion_model.blocks):
-                    patcher.model.diffusion_model.blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-                if vace_layers is not None:
-                    for i, block in enumerate(patcher.model.diffusion_model.vace_blocks):
-                        patcher.model.diffusion_model.vace_blocks[i] = torch.compile(block, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])
-            else:
-                patcher.model.diffusion_model = torch.compile(patcher.model.diffusion_model, fullgraph=compile_args["fullgraph"], dynamic=compile_args["dynamic"], backend=compile_args["backend"], mode=compile_args["mode"])        
+        # Store compile_args for later application AFTER multi-GPU setup
+        # torch.compile + DataParallel have compatibility issues, so we defer compilation
+        patcher.model._pending_compile_args = compile_args if compile_args is not None and vram_management_args is None else None        
         
         if load_device == "offload_device" and patcher.model.diffusion_model.device != offload_device:
             log.info(f"Moving diffusion model from {patcher.model.diffusion_model.device} to {offload_device}")
@@ -1586,6 +1573,75 @@ class WanVideoMultiGPULoader:
                 log.info(f"   - For Block Distribution: Larger batches improve pipeline throughput")
                 log.info("   - Try multiple prompts or longer sequences for better parallelism")
                 log.info("======================================")
+        
+        # Apply torch.compile AFTER multi-GPU setup for better compatibility
+        if hasattr(patcher.model, '_pending_compile_args') and patcher.model._pending_compile_args is not None:
+            compile_args = patcher.model._pending_compile_args
+            log.info("Applying torch.compile AFTER multi-GPU setup for better compatibility")
+            
+            # Check if model is wrapped in DataParallel
+            is_dataparallel = hasattr(patcher.model.diffusion_model, 'module')
+            
+            if is_dataparallel:
+                log.info("Detected DataParallel wrapper - applying torch.compile to underlying module")
+                target_model = patcher.model.diffusion_model.module  # Unwrap DataParallel
+            else:
+                log.info("No DataParallel wrapper detected - applying torch.compile directly")
+                target_model = patcher.model.diffusion_model
+            
+            # Set torch dynamo config
+            torch._dynamo.config.cache_size_limit = compile_args["dynamo_cache_size_limit"]
+            try:
+                if hasattr(torch, '_dynamo') and hasattr(torch._dynamo, 'config'):
+                    torch._dynamo.config.recompile_limit = compile_args["dynamo_recompile_limit"]
+            except Exception as e:
+                log.warning(f"Could not set recompile_limit: {e}")
+            
+            # Apply compilation
+            try:
+                if compile_args["compile_transformer_blocks_only"]:
+                    log.info("Compiling individual transformer blocks")
+                    for i, block in enumerate(target_model.blocks):
+                        target_model.blocks[i] = torch.compile(block, 
+                            fullgraph=compile_args["fullgraph"], 
+                            dynamic=compile_args["dynamic"], 
+                            backend=compile_args["backend"], 
+                            mode=compile_args["mode"])
+                    if hasattr(target_model, 'vace_blocks') and target_model.vace_blocks is not None:
+                        for i, block in enumerate(target_model.vace_blocks):
+                            target_model.vace_blocks[i] = torch.compile(block,
+                                fullgraph=compile_args["fullgraph"], 
+                                dynamic=compile_args["dynamic"], 
+                                backend=compile_args["backend"], 
+                                mode=compile_args["mode"])
+                    log.info("Individual block compilation completed successfully")
+                else:
+                    log.info("Compiling entire diffusion model")
+                    if is_dataparallel:
+                        # Replace the module inside DataParallel wrapper
+                        compiled_model = torch.compile(target_model,
+                            fullgraph=compile_args["fullgraph"], 
+                            dynamic=compile_args["dynamic"], 
+                            backend=compile_args["backend"], 
+                            mode=compile_args["mode"])
+                        patcher.model.diffusion_model.module = compiled_model
+                    else:
+                        # Direct replacement
+                        patcher.model.diffusion_model = torch.compile(target_model,
+                            fullgraph=compile_args["fullgraph"], 
+                            dynamic=compile_args["dynamic"], 
+                            backend=compile_args["backend"], 
+                            mode=compile_args["mode"])
+                    log.info("Full model compilation completed successfully")
+                    
+                log.info("torch.compile applied successfully after multi-GPU setup")
+                
+            except Exception as e:
+                log.warning(f"torch.compile failed after multi-GPU setup: {e}")
+                log.warning("Proceeding without compilation")
+            
+            # Clean up
+            delattr(patcher.model, '_pending_compile_args')
         
         return result
 
