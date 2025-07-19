@@ -96,7 +96,7 @@ def setup_multi_gpu_parallelism(model, parallelism_type="data_parallel", gpu_ids
 
 def distribute_model_blocks(model, gpu_ids):
     """
-    Distribute model blocks across multiple GPUs.
+    Distribute model blocks across multiple GPUs for pipeline parallelism.
     
     Args:
         model: The model to distribute
@@ -108,26 +108,53 @@ def distribute_model_blocks(model, gpu_ids):
     
     num_blocks = len(model.blocks)
     num_gpus = len(gpu_ids)
-    blocks_per_gpu = num_blocks // num_gpus
+    blocks_per_gpu = max(1, num_blocks // num_gpus)
     
-    log.info(f"Distributing {num_blocks} blocks across {num_gpus} GPUs ({blocks_per_gpu} blocks per GPU)")
+    log.info(f"Distributing {num_blocks} blocks across {num_gpus} GPUs (~{blocks_per_gpu} blocks per GPU)")
     
+    # Keep input processing on GPU 0
+    log.info(f"Input processing components on GPU {gpu_ids[0]}")
+    if hasattr(model, 'patch_embedding'):
+        model.patch_embedding.to(f'cuda:{gpu_ids[0]}')
+    if hasattr(model, 'time_embedding'):
+        model.time_embedding.to(f'cuda:{gpu_ids[0]}')
+    if hasattr(model, 'text_embedding'):
+        model.text_embedding.to(f'cuda:{gpu_ids[0]}')
+    
+    # Distribute transformer blocks across GPUs
+    block_assignments = {}
     for i, block in enumerate(model.blocks):
-        target_gpu = gpu_ids[i // blocks_per_gpu]
-        if i < num_gpus * blocks_per_gpu:
-            block.to(f'cuda:{target_gpu}')
-            log.debug(f"Moved block {i} to GPU {target_gpu}")
+        # More even distribution that ensures all GPUs are used
+        target_gpu_idx = min(i // blocks_per_gpu, num_gpus - 1)
+        target_gpu = gpu_ids[target_gpu_idx]
+        
+        block.to(f'cuda:{target_gpu}')
+        block_assignments[i] = target_gpu
+        log.info(f"Block {i} -> GPU {target_gpu}")
+    
+    # Put output head on the last GPU
+    last_gpu = gpu_ids[-1]
+    if hasattr(model, 'head'):
+        model.head.to(f'cuda:{last_gpu}')
+        log.info(f"Output head on GPU {last_gpu}")
+    
+    # Store the device mapping for forward pass
+    model.block_device_map = {i: f'cuda:{gpu}' for i, gpu in block_assignments.items()}
+    model.input_device = f'cuda:{gpu_ids[0]}'
+    model.output_device = f'cuda:{last_gpu}'
     
     # Handle VACE blocks if they exist
     if hasattr(model, 'vace_blocks') and model.vace_blocks:
         num_vace_blocks = len(model.vace_blocks)
-        vace_blocks_per_gpu = num_vace_blocks // num_gpus
+        vace_blocks_per_gpu = max(1, num_vace_blocks // num_gpus)
         
         for i, block in enumerate(model.vace_blocks):
-            target_gpu = gpu_ids[i // vace_blocks_per_gpu]
-            if i < num_gpus * vace_blocks_per_gpu:
-                block.to(f'cuda:{target_gpu}')
-                log.debug(f"Moved VACE block {i} to GPU {target_gpu}")
+            target_gpu_idx = min(i // vace_blocks_per_gpu, num_gpus - 1)
+            target_gpu = gpu_ids[target_gpu_idx]
+            block.to(f'cuda:{target_gpu}')
+            log.info(f"VACE block {i} -> GPU {target_gpu}")
+    
+    log.info(f"Pipeline parallelism setup complete with {len(set(block_assignments.values()))} active GPUs")
 
 def apply_rope_comfy(xq, xk, freqs_cis):
     """Apply RoPE (Rotary Position Embedding) to query and key tensors"""
@@ -2022,8 +2049,19 @@ class WanModel(ModelMixin, ConfigMixin):
                         if self.slg_start_percent <= current_step_percentage <= self.slg_end_percent:
                             continue
                 
-                # Handle multi-GPU block movement
-                if self.parallel_devices and len(self.parallel_devices) > 1:
+                # Handle pipeline parallelism with proper data movement
+                if hasattr(self, 'block_device_map') and self.block_device_map:
+                    # Pipeline parallelism mode - move data to block's device
+                    target_device = self.block_device_map.get(b, self.main_device)
+                    if str(x.device) != target_device:
+                        x = x.to(target_device, non_blocking=True)
+                        # Also move kwargs tensors to the same device
+                        for key, value in kwargs.items():
+                            if hasattr(value, 'to') and hasattr(value, 'device'):
+                                kwargs[key] = value.to(target_device, non_blocking=True)
+                
+                # Handle multi-GPU block movement (block swap mode)
+                elif self.parallel_devices and len(self.parallel_devices) > 1:
                     if b <= self.blocks_to_swap and self.blocks_to_swap >= 0:
                         # Move block to its assigned GPU
                         target_device = self.parallel_devices[min(b // (len(self.blocks) // len(self.parallel_devices)), len(self.parallel_devices) - 1)]
@@ -2083,6 +2121,12 @@ class WanModel(ModelMixin, ConfigMixin):
             x = x[:, :x_len]
             grid_sizes = torch.stack([torch.tensor([u[0] - 1, u[1], u[2]]) for u in grid_sizes]).to(grid_sizes.device)
 
+        # Handle pipeline parallelism for output head
+        if hasattr(self, 'output_device') and self.output_device:
+            if str(x.device) != self.output_device:
+                x = x.to(self.output_device, non_blocking=True)
+            e = e.to(self.output_device)
+        
         x = self.head(x, e.to(x.device))
         x = self.unpatchify(x, grid_sizes) # type: ignore[arg-type]
         x = [u.float() for u in x]
