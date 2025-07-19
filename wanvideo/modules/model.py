@@ -162,18 +162,52 @@ def apply_rope_comfy(xq, xk, freqs_cis):
     
     # Handle the case where freqs_cis has 2x2 rotation matrices from rope_riflex
     if freqs_cis.dim() > 3 and freqs_cis.shape[-1] == 2 and freqs_cis.shape[-2] == 2:
-        # freqs_cis shape: [batch, seq_len, 1, dim//2, 2, 2] - rotation matrices
+        # Debug: Check tensor shapes
+        # print(f"freqs_cis shape: {freqs_cis.shape}")
+        # print(f"xq shape: {xq.shape}")
+        
         # Reshape query and key tensors to work with rotation matrices
         xq_reshaped = xq.to(dtype=freqs_cis.dtype).reshape(*xq.shape[:-1], -1, 2)
         xk_reshaped = xk.to(dtype=freqs_cis.dtype).reshape(*xk.shape[:-1], -1, 2)
         
-        # Remove the singleton dimension from freqs_cis for proper broadcasting
-        freqs_cis_squeezed = freqs_cis.squeeze(-3) if freqs_cis.shape[-3] == 1 else freqs_cis
+        # Handle dimension alignment more carefully
+        if freqs_cis.dim() == 6:  # [batch, 1, seq_len, dim//2, 2, 2] or similar
+            freqs_cis = freqs_cis.squeeze(1)  # Remove the singleton dimension at position 1
         
-        # Apply rotation matrices: [x', y'] = R @ [x, y]
-        # Use matmul for cleaner matrix multiplication
-        xq_out = torch.matmul(freqs_cis_squeezed, xq_reshaped.unsqueeze(-1)).squeeze(-1).reshape(*xq.shape).type_as(xq)
-        xk_out = torch.matmul(freqs_cis_squeezed, xk_reshaped.unsqueeze(-1)).squeeze(-1).reshape(*xk.shape).type_as(xk)
+        # Ensure freqs_cis matches the sequence dimension of xq_reshaped
+        if freqs_cis.shape[1] != xq_reshaped.shape[1]:
+            # Take only the needed sequence length
+            seq_len = min(freqs_cis.shape[1], xq_reshaped.shape[1])
+            freqs_cis = freqs_cis[:, :seq_len]
+            xq_reshaped = xq_reshaped[:, :seq_len]
+            xk_reshaped = xk_reshaped[:, :seq_len]
+        
+        # Apply rotation matrices using batched matrix multiplication
+        # freqs_cis: [batch, seq_len, dim//2, 2, 2]
+        # xq_reshaped: [batch, seq_len, dim//2, 2]
+        xq_rotated = torch.matmul(freqs_cis, xq_reshaped.unsqueeze(-1)).squeeze(-1)
+        xk_rotated = torch.matmul(freqs_cis, xk_reshaped.unsqueeze(-1)).squeeze(-1)
+        
+        # Reshape back to original shape, handling potential sequence length truncation
+        if xq_rotated.shape[1] != xq.shape[1]:
+            # Pad or truncate as needed
+            target_seq_len = xq.shape[1]
+            if xq_rotated.shape[1] < target_seq_len:
+                # Pad with zeros
+                pad_len = target_seq_len - xq_rotated.shape[1]
+                pad_shape = list(xq_rotated.shape)
+                pad_shape[1] = pad_len
+                xq_pad = torch.zeros(pad_shape, dtype=xq_rotated.dtype, device=xq_rotated.device)
+                xk_pad = torch.zeros(pad_shape, dtype=xk_rotated.dtype, device=xk_rotated.device)
+                xq_rotated = torch.cat([xq_rotated, xq_pad], dim=1)
+                xk_rotated = torch.cat([xk_rotated, xk_pad], dim=1)
+            else:
+                # Truncate
+                xq_rotated = xq_rotated[:, :target_seq_len]
+                xk_rotated = xk_rotated[:, :target_seq_len]
+        
+        xq_out = xq_rotated.reshape(*xq.shape).type_as(xq)
+        xk_out = xk_rotated.reshape(*xk.shape).type_as(xk)
         
     else:
         # Original cos/sin format: freqs_cis shape: [..., 2]
@@ -222,8 +256,33 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
         if use_rotation_matrices:
             # Handle rotation matrix format
             xq_reshaped = xq_chunk.to(dtype=freqs_cis.dtype).reshape(*xq_chunk.shape[:-1], -1, 2)
-            freqs_chunk_squeezed = freqs_chunk.squeeze(-3) if freqs_chunk.shape[-3] == 1 else freqs_chunk
-            xq_out[tuple(slices)] = torch.matmul(freqs_chunk_squeezed, xq_reshaped.unsqueeze(-1)).squeeze(-1).reshape(*xq_chunk.shape).type_as(xq)
+            
+            # Handle dimension alignment for chunked processing
+            freqs_chunk_processed = freqs_chunk
+            if freqs_chunk_processed.dim() == 6:
+                freqs_chunk_processed = freqs_chunk_processed.squeeze(1)
+            
+            # Ensure dimensions match for matrix multiplication
+            if freqs_chunk_processed.shape[1] != xq_reshaped.shape[1]:
+                seq_len = min(freqs_chunk_processed.shape[1], xq_reshaped.shape[1])
+                freqs_chunk_processed = freqs_chunk_processed[:, :seq_len]
+                xq_reshaped = xq_reshaped[:, :seq_len]
+            
+            xq_rotated = torch.matmul(freqs_chunk_processed, xq_reshaped.unsqueeze(-1)).squeeze(-1)
+            
+            # Handle sequence length mismatch if needed
+            if xq_rotated.shape[1] != xq_chunk.shape[1]:
+                target_seq_len = xq_chunk.shape[1]
+                if xq_rotated.shape[1] < target_seq_len:
+                    pad_len = target_seq_len - xq_rotated.shape[1]
+                    pad_shape = list(xq_rotated.shape)
+                    pad_shape[1] = pad_len
+                    xq_pad = torch.zeros(pad_shape, dtype=xq_rotated.dtype, device=xq_rotated.device)
+                    xq_rotated = torch.cat([xq_rotated, xq_pad], dim=1)
+                else:
+                    xq_rotated = xq_rotated[:, :target_seq_len]
+            
+            xq_out[tuple(slices)] = xq_rotated.reshape(*xq_chunk.shape).type_as(xq)
         else:
             # Handle cos/sin format
             xq_chunk_ = xq_chunk.to(dtype=freqs_cis.dtype).reshape(*xq_chunk.shape[:-1], -1, 1, 2)
@@ -251,8 +310,33 @@ def apply_rope_comfy_chunked(xq, xk, freqs_cis, num_chunks=4):
         if use_rotation_matrices:
             # Handle rotation matrix format
             xk_reshaped = xk_chunk.to(dtype=freqs_cis.dtype).reshape(*xk_chunk.shape[:-1], -1, 2)
-            freqs_chunk_squeezed = freqs_chunk.squeeze(-3) if freqs_chunk.shape[-3] == 1 else freqs_chunk
-            xk_out[tuple(slices)] = torch.matmul(freqs_chunk_squeezed, xk_reshaped.unsqueeze(-1)).squeeze(-1).reshape(*xk_chunk.shape).type_as(xk)
+            
+            # Handle dimension alignment for chunked processing
+            freqs_chunk_processed = freqs_chunk
+            if freqs_chunk_processed.dim() == 6:
+                freqs_chunk_processed = freqs_chunk_processed.squeeze(1)
+            
+            # Ensure dimensions match for matrix multiplication
+            if freqs_chunk_processed.shape[1] != xk_reshaped.shape[1]:
+                seq_len = min(freqs_chunk_processed.shape[1], xk_reshaped.shape[1])
+                freqs_chunk_processed = freqs_chunk_processed[:, :seq_len]
+                xk_reshaped = xk_reshaped[:, :seq_len]
+            
+            xk_rotated = torch.matmul(freqs_chunk_processed, xk_reshaped.unsqueeze(-1)).squeeze(-1)
+            
+            # Handle sequence length mismatch if needed
+            if xk_rotated.shape[1] != xk_chunk.shape[1]:
+                target_seq_len = xk_chunk.shape[1]
+                if xk_rotated.shape[1] < target_seq_len:
+                    pad_len = target_seq_len - xk_rotated.shape[1]
+                    pad_shape = list(xk_rotated.shape)
+                    pad_shape[1] = pad_len
+                    xk_pad = torch.zeros(pad_shape, dtype=xk_rotated.dtype, device=xk_rotated.device)
+                    xk_rotated = torch.cat([xk_rotated, xk_pad], dim=1)
+                else:
+                    xk_rotated = xk_rotated[:, :target_seq_len]
+            
+            xk_out[tuple(slices)] = xk_rotated.reshape(*xk_chunk.shape).type_as(xk)
         else:
             # Handle cos/sin format
             xk_chunk_ = xk_chunk.to(dtype=freqs_cis.dtype).reshape(*xk_chunk.shape[:-1], -1, 1, 2)
