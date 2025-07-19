@@ -2147,11 +2147,21 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # Handle pipeline parallelism for output head
         if hasattr(self, 'output_device') and self.output_device:
-            if str(x.device) != self.output_device:
-                x = x.to(self.output_device, non_blocking=True)
-            e = e.to(self.output_device)
+            target_device = self.output_device
+            
+            # Ensure head is on the target device
+            if str(next(self.head.parameters()).device) != target_device:
+                self.head.to(target_device)
+            
+            # Move all data to target device
+            if str(x.device) != target_device:
+                x = x.to(target_device, non_blocking=True)
+            if str(e.device) != target_device:
+                e = e.to(target_device, non_blocking=True)
+            if hasattr(grid_sizes, 'device') and str(grid_sizes.device) != target_device:
+                grid_sizes = grid_sizes.to(target_device, non_blocking=True)
         
-        x = self.head(x, e.to(x.device))
+        x = self.head(x, e)
         x = self.unpatchify(x, grid_sizes) # type: ignore[arg-type]
         x = [u.float() for u in x]
         return (x, pred_id) if pred_id is not None else (x, None)
