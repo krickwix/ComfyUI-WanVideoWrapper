@@ -131,51 +131,26 @@ class WanDistributedModel(WanVideoModel):
         if config.world_size > 1:
             log.info("🚀 Initializing multi-GPU distributed environment...")
             try:
-                # Initialize distributed environment
-                if not dist.is_initialized():
-                    log.info("   - Setting environment variables...")
-                    # Set environment variables for single-node multi-GPU
-                    os.environ['MASTER_ADDR'] = 'localhost'
-                    os.environ['MASTER_PORT'] = '12355'
-                    log.info(f"   - MASTER_ADDR: {os.environ['MASTER_ADDR']}")
-                    log.info(f"   - MASTER_PORT: {os.environ['MASTER_PORT']}")
-                    
-                    log.info("   - Initializing process group...")
-                    dist.init_process_group(
-                        backend=config.backend,
-                        init_method="env://",
-                        rank=config.rank,
-                        world_size=config.world_size
-                    )
-                    self.is_distributed = True
-                    log.info(f"✅ Initialized distributed environment with {config.world_size} processes")
-                else:
-                    log.info("ℹ️ Distributed environment already initialized")
+                # For single-server multi-GPU, we'll use a simplified approach
+                # Instead of full distributed processes, we'll use DataParallel-like sharding
+                log.info("🔄 Single-server multi-GPU mode detected")
+                log.info("   - Using simplified multi-GPU approach (no process spawning)")
                 
-                # Setup context parallel if enabled
-                if config.use_context_parallel and XFUSER_AVAILABLE:
-                    log.info("🔄 Setting up context parallel...")
-                    if config.ulysses_size > 1 or config.ring_size > 1:
-                        assert config.ulysses_size * config.ring_size == config.world_size, \
-                            f"The number of ulysses_size and ring_size should be equal to the world size."
-                        
-                        log.info("   - Initializing distributed environment for xfuser...")
-                        init_distributed_environment(
-                            rank=dist.get_rank(), 
-                            world_size=dist.get_world_size()
-                        )
-                        
-                        log.info("   - Initializing model parallel...")
-                        initialize_model_parallel(
-                            sequence_parallel_degree=dist.get_world_size(),
-                            ring_degree=config.ring_size,
-                            ulysses_degree=config.ulysses_size,
-                        )
-                        log.info(f"✅ Initialized context parallel: ulysses_size={config.ulysses_size}, ring_size={config.ring_size}")
-                    else:
-                        log.info("ℹ️ Context parallel disabled (ulysses_size=1, ring_size=1)")
-                elif config.use_context_parallel and not XFUSER_AVAILABLE:
-                    log.warning("⚠️ Context parallel requested but xfuser not available")
+                # Set up device mapping for multi-GPU
+                self.device_map = {}
+                self.gpu_devices = list(range(config.world_size))
+                log.info(f"   - GPU devices: {self.gpu_devices}")
+                
+                # Mark as distributed but with simplified setup
+                self.is_distributed = True
+                self.is_single_server = True
+                log.info(f"✅ Initialized single-server multi-GPU environment with {config.world_size} GPUs")
+                
+                # For single-server, context parallel requires process spawning which we're avoiding
+                if config.use_context_parallel:
+                    log.warning("⚠️ Context parallel disabled for single-server mode (requires process spawning)")
+                    log.info("   - Use FSDP or device sharding instead for multi-GPU acceleration")
+                    config.use_context_parallel = False
                 else:
                     log.info("ℹ️ Context parallel not enabled")
             except Exception as e:
@@ -187,18 +162,30 @@ class WanDistributedModel(WanVideoModel):
         else:
             log.info("ℹ️ Single-GPU mode, skipping distributed initialization")
         
-        # Apply FSDP if enabled (only for multi-GPU)
-        if config.use_fsdp and config.world_size > 1:
-            log.info("🔧 Applying FSDP to model...")
+        # Apply multi-GPU sharding if enabled (only for multi-GPU)
+        if config.world_size > 1:
+            log.info("🔧 Applying multi-GPU sharding...")
             try:
-                self.fsdp_model = self._apply_fsdp(config)
-                log.info("✅ Applied FSDP to model")
+                if config.use_fsdp and hasattr(self, 'is_single_server') and self.is_single_server:
+                    # Use simplified FSDP for single-server
+                    self.fsdp_model = self._apply_single_server_fsdp(config)
+                    log.info("✅ Applied single-server FSDP to model")
+                elif config.use_fsdp:
+                    # Use full FSDP for multi-server
+                    self.fsdp_model = self._apply_fsdp(config)
+                    log.info("✅ Applied full FSDP to model")
+                else:
+                    # Use simple device sharding
+                    self._apply_device_sharding(config)
+                    log.info("✅ Applied device sharding to model")
             except Exception as e:
-                log.error(f"❌ Failed to apply FSDP: {e}")
-                log.info("🔄 Falling back to non-FSDP mode")
-                config.use_fsdp = False
+                log.error(f"❌ Failed to apply multi-GPU sharding: {e}")
+                log.info("🔄 Falling back to single-GPU mode")
+                config.world_size = 1
+                config.rank = 0
+                self.is_distributed = False
         else:
-            log.info("ℹ️ FSDP not enabled or single-GPU mode")
+            log.info("ℹ️ Single-GPU mode, no sharding needed")
         
         log.info("=" * 60)
         log.info("🎯 DISTRIBUTED INFERENCE SETUP COMPLETE")
@@ -253,6 +240,84 @@ class WanDistributedModel(WanVideoModel):
             log.error(f"❌ Failed to apply FSDP: {e}")
             raise
 
+    def _apply_single_server_fsdp(self, config):
+        """Apply simplified FSDP for single-server multi-GPU"""
+        log.info("🔧 Applying single-server FSDP...")
+        
+        if not hasattr(self, 'diffusion_model') or self.diffusion_model is None:
+            log.error("❌ Model must be loaded before applying FSDP")
+            raise ValueError("Model must be loaded before applying FSDP")
+        
+        log.info(f"   - Using {len(self.gpu_devices)} GPUs: {self.gpu_devices}")
+        log.info(f"   - Param dtype: {config.param_dtype}")
+        log.info(f"   - Sharding strategy: {config.sharding_strategy}")
+        
+        try:
+            # Create a simplified FSDP wrapper that works in single process
+            # This will shard the model across GPUs without spawning processes
+            fsdp_model = FSDP(
+                module=self.diffusion_model,
+                process_group=None,  # No process group for single-server
+                sharding_strategy=config.sharding_strategy,
+                auto_wrap_policy=None,  # No auto wrap for simplicity
+                mixed_precision=MixedPrecision(
+                    param_dtype=config.param_dtype,
+                    reduce_dtype=config.reduce_dtype,
+                    buffer_dtype=config.buffer_dtype
+                ),
+                device_id=torch.cuda.current_device(),
+                sync_module_states=config.sync_module_states
+            )
+            
+            log.info("✅ Single-server FSDP applied successfully")
+            return fsdp_model
+        except Exception as e:
+            log.error(f"❌ Failed to apply single-server FSDP: {e}")
+            raise
+
+    def _apply_device_sharding(self, config):
+        """Apply simple device sharding across GPUs"""
+        log.info("🔧 Applying device sharding...")
+        
+        if not hasattr(self, 'diffusion_model') or self.diffusion_model is None:
+            log.error("❌ Model must be loaded before applying device sharding")
+            raise ValueError("Model must be loaded before applying device sharding")
+        
+        log.info(f"   - Sharding across {len(self.gpu_devices)} GPUs: {self.gpu_devices}")
+        
+        try:
+            # Move different parts of the model to different GPUs
+            # This is a simplified approach that doesn't require process spawning
+            model = self.diffusion_model
+            
+            # Shard transformer blocks across GPUs
+            if hasattr(model, 'blocks') and len(model.blocks) > 0:
+                blocks_per_gpu = len(model.blocks) // len(self.gpu_devices)
+                log.info(f"   - Sharding {len(model.blocks)} blocks across {len(self.gpu_devices)} GPUs")
+                log.info(f"   - Blocks per GPU: {blocks_per_gpu}")
+                
+                for i, block in enumerate(model.blocks):
+                    gpu_idx = i // blocks_per_gpu
+                    if gpu_idx >= len(self.gpu_devices):
+                        gpu_idx = len(self.gpu_devices) - 1
+                    device = f"cuda:{self.gpu_devices[gpu_idx]}"
+                    block.to(device)
+                    log.info(f"   - Block {i} -> {device}")
+            
+            # Move other components to first GPU
+            if hasattr(model, 'patch_embedding'):
+                model.patch_embedding.to(f"cuda:{self.gpu_devices[0]}")
+            if hasattr(model, 'pos_embedding'):
+                model.pos_embedding.to(f"cuda:{self.gpu_devices[0]}")
+            if hasattr(model, 'output_proj'):
+                model.output_proj.to(f"cuda:{self.gpu_devices[0]}")
+            
+            log.info("✅ Device sharding applied successfully")
+            
+        except Exception as e:
+            log.error(f"❌ Failed to apply device sharding: {e}")
+            raise
+
     def forward_distributed(self, *args, **kwargs):
         """Forward pass using distributed inference"""
         if self.fsdp_model is not None:
@@ -264,21 +329,38 @@ class WanDistributedModel(WanVideoModel):
 
     def cleanup(self):
         """Cleanup distributed resources"""
+        log.info("🧹 Cleaning up distributed resources...")
+        
         if self.fsdp_model is not None:
-            # Free FSDP storage
-            for m in self.fsdp_model.modules():
-                if isinstance(m, FSDP):
-                    from torch.distributed.utils import _free_storage
-                    _free_storage(m._handle.flat_param.data)
-            del self.fsdp_model
-            self.fsdp_model = None
+            log.info("   - Cleaning up FSDP model...")
+            try:
+                # Free FSDP storage
+                for m in self.fsdp_model.modules():
+                    if isinstance(m, FSDP):
+                        from torch.distributed.utils import _free_storage
+                        _free_storage(m._handle.flat_param.data)
+                del self.fsdp_model
+                self.fsdp_model = None
+                log.info("   - FSDP model cleaned up")
+            except Exception as e:
+                log.warning(f"   - FSDP cleanup warning: {e}")
         
-        if self.is_distributed and dist.is_initialized():
-            dist.destroy_process_group()
+        if self.is_distributed and hasattr(self, 'is_single_server') and self.is_single_server:
+            log.info("   - Single-server mode, no process group to destroy")
             self.is_distributed = False
+        elif self.is_distributed and dist.is_initialized():
+            log.info("   - Destroying process group...")
+            try:
+                dist.destroy_process_group()
+                self.is_distributed = False
+                log.info("   - Process group destroyed")
+            except Exception as e:
+                log.warning(f"   - Process group cleanup warning: {e}")
         
+        log.info("   - Running garbage collection...")
         gc.collect()
         torch.cuda.empty_cache()
+        log.info("✅ Cleanup complete")
 
 class WanDistributedConfigNode:
     """ComfyUI node for configuring Wan2.1 distributed settings"""
