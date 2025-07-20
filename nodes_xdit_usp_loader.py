@@ -94,7 +94,7 @@ class WanDistributedConfig:
         self.sync_module_states = sync_module_states
 
 # Import the regular WanVideoModel for compatibility
-from .nodes_model_loading import WanVideoModel
+from .nodes_model_loading import WanVideoModel, WanVideoModelConfig
 
 class WanDistributedModel(WanVideoModel):
     """WanVideo model wrapper for Wan2.1 distributed inference"""
@@ -412,7 +412,7 @@ class WanDistributedModelLoader:
         
         # Create ComfyUI model wrapper
         comfy_model = WanDistributedModel(
-            comfy.model_base.ModelConfig(base_dtype),
+            WanVideoModelConfig(base_dtype),
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
         )

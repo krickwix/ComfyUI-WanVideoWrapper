@@ -110,8 +110,9 @@ def test_model_wrapper():
         import comfy.model_base
         
         # Create a dummy model wrapper
+        from nodes_model_loading import WanVideoModelConfig
         model = WanDistributedModel(
-            comfy.model_base.ModelConfig(torch.bfloat16),
+            WanVideoModelConfig(torch.bfloat16),
             model_type=comfy.model_base.ModelType.FLOW,
             device=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
         )

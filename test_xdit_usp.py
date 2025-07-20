@@ -84,7 +84,8 @@ def test_model_wrapper():
         import comfy.model_base
         
         # Create a dummy model config
-        model_config = comfy.model_base.ModelConfig(torch.bfloat16)
+        from nodes_model_loading import WanVideoModelConfig
+        model_config = WanVideoModelConfig(torch.bfloat16)
         
         # Create the wrapper
         model = XDitUSPWanVideoModel(
