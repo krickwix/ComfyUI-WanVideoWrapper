@@ -305,46 +305,87 @@ class WanDistributedModel(WanVideoModel):
         try:
             model = self.diffusion_model
             
+            # Verify model has required attributes
+            if not hasattr(model, 'blocks'):
+                log.error("❌ Model does not have 'blocks' attribute")
+                raise ValueError("Model does not have required 'blocks' attribute")
+            
+            log.info(f"   - Model type: {type(model)}")
+            log.info(f"   - Model has blocks: {hasattr(model, 'blocks')}")
+            log.info(f"   - Number of blocks: {len(model.blocks) if hasattr(model, 'blocks') and model.blocks is not None else 'None'}")
+            
             # Shard transformer blocks across GPUs (most memory intensive)
-            if hasattr(model, 'blocks') and len(model.blocks) > 0:
+            if hasattr(model, 'blocks') and model.blocks is not None and len(model.blocks) > 0:
                 blocks_per_gpu = max(1, len(model.blocks) // len(self.gpu_devices))
                 log.info(f"   - Sharding {len(model.blocks)} blocks across {len(self.gpu_devices)} GPUs")
                 log.info(f"   - Blocks per GPU: {blocks_per_gpu}")
                 
+                successful_blocks = 0
                 for i, block in enumerate(model.blocks):
-                    gpu_idx = i // blocks_per_gpu
-                    if gpu_idx >= len(self.gpu_devices):
-                        gpu_idx = len(self.gpu_devices) - 1
-                    device = f"cuda:{self.gpu_devices[gpu_idx]}"
-                    block.to(device)
-                    if i % 5 == 0:  # Log every 5th block to avoid spam
-                        log.info(f"   - Block {i} -> {device}")
+                    try:
+                        if block is None:
+                            log.warning(f"   - Block {i} is None, skipping")
+                            continue
+                            
+                        gpu_idx = i // blocks_per_gpu
+                        if gpu_idx >= len(self.gpu_devices):
+                            gpu_idx = len(self.gpu_devices) - 1
+                        device = f"cuda:{self.gpu_devices[gpu_idx]}"
+                        block.to(device)
+                        successful_blocks += 1
+                        
+                        if i % 5 == 0:  # Log every 5th block to avoid spam
+                            log.info(f"   - Block {i} -> {device}")
+                    except Exception as e:
+                        log.warning(f"   - Failed to move block {i} to {device}: {e}")
+                        # Move to first GPU as fallback
+                        try:
+                            block.to(f"cuda:{self.gpu_devices[0]}")
+                            successful_blocks += 1
+                            log.info(f"   - Block {i} -> cuda:{self.gpu_devices[0]} (fallback)")
+                        except Exception as e2:
+                            log.error(f"   - Failed to move block {i} to fallback device: {e2}")
+                
+                log.info(f"   - Successfully moved {successful_blocks}/{len(model.blocks)} blocks")
+            else:
+                log.warning("   - No transformer blocks found or blocks is None")
             
             # Distribute other components across GPUs
             components = []
-            if hasattr(model, 'patch_embedding'):
+            if hasattr(model, 'patch_embedding') and model.patch_embedding is not None:
                 components.append(('patch_embedding', model.patch_embedding))
-            if hasattr(model, 'pos_embedding'):
+            if hasattr(model, 'pos_embedding') and model.pos_embedding is not None:
                 components.append(('pos_embedding', model.pos_embedding))
-            if hasattr(model, 'output_proj'):
+            if hasattr(model, 'output_proj') and model.output_proj is not None:
                 components.append(('output_proj', model.output_proj))
-            if hasattr(model, 'add_conv_in'):
+            if hasattr(model, 'add_conv_in') and model.add_conv_in is not None:
                 components.append(('add_conv_in', model.add_conv_in))
-            if hasattr(model, 'add_proj'):
+            if hasattr(model, 'add_proj') and model.add_proj is not None:
                 components.append(('add_proj', model.add_proj))
-            if hasattr(model, 'attn_conv_in'):
+            if hasattr(model, 'attn_conv_in') and model.attn_conv_in is not None:
                 components.append(('attn_conv_in', model.attn_conv_in))
-            if hasattr(model, 'ref_conv'):
+            if hasattr(model, 'ref_conv') and model.ref_conv is not None:
                 components.append(('ref_conv', model.ref_conv))
-            if hasattr(model, 'control_adapter'):
+            if hasattr(model, 'control_adapter') and model.control_adapter is not None:
                 components.append(('control_adapter', model.control_adapter))
+            
+            log.info(f"   - Found {len(components)} components to distribute")
             
             # Distribute components across GPUs
             for i, (name, component) in enumerate(components):
-                gpu_idx = i % len(self.gpu_devices)
-                device = f"cuda:{self.gpu_devices[gpu_idx]}"
-                component.to(device)
-                log.info(f"   - {name} -> {device}")
+                try:
+                    gpu_idx = i % len(self.gpu_devices)
+                    device = f"cuda:{self.gpu_devices[gpu_idx]}"
+                    component.to(device)
+                    log.info(f"   - {name} -> {device}")
+                except Exception as e:
+                    log.warning(f"   - Failed to move {name} to {device}: {e}")
+                    # Move to first GPU as fallback
+                    try:
+                        component.to(f"cuda:{self.gpu_devices[0]}")
+                        log.info(f"   - {name} -> cuda:{self.gpu_devices[0]} (fallback)")
+                    except Exception as e2:
+                        log.error(f"   - Failed to move {name} to fallback device: {e2}")
             
             # Set the main device for the model
             model.main_device = f"cuda:{self.gpu_devices[0]}"
