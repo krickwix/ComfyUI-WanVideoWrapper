@@ -320,6 +320,11 @@ class WanDistributedModel(WanVideoModel):
 
     def forward_distributed(self, *args, **kwargs):
         """Forward pass using distributed inference"""
+        # Ensure inputs are in the correct dtype
+        if hasattr(self, 'base_dtype'):
+            args = [arg.to(dtype=self.base_dtype) if torch.is_tensor(arg) else arg for arg in args]
+            kwargs = {k: v.to(dtype=self.base_dtype) if torch.is_tensor(v) else v for k, v in kwargs.items()}
+        
         if self.fsdp_model is not None:
             return self.fsdp_model(*args, **kwargs)
         elif hasattr(self, 'diffusion_model'):
@@ -694,6 +699,10 @@ class WanDistributedModelLoader:
             
             comfy_model.diffusion_model = transformer
             comfy_model.load_device = offload_device
+            
+            # Ensure the model maintains consistent dtype
+            comfy_model.base_dtype = base_dtype
+            log.info(f"   - Model base dtype: {base_dtype}")
             log.info("✅ ComfyUI model wrapper created")
         except Exception as e:
             log.error(f"❌ Failed to create ComfyUI model wrapper: {e}")
@@ -704,6 +713,7 @@ class WanDistributedModelLoader:
         try:
             param_count = sum(1 for _ in transformer.named_parameters())
             log.info(f"   - Total parameters to load: {param_count}")
+            log.info(f"   - Target dtype: {base_dtype}")
             pbar = ProgressBar(param_count)
             
             loaded_count = 0
@@ -712,7 +722,9 @@ class WanDistributedModelLoader:
                     total=param_count,
                     leave=True):
                 try:
-                    set_module_tensor_to_device(transformer, name, device=offload_device, dtype=base_dtype, value=sd[name])
+                    # Ensure the loaded weight has the correct dtype
+                    weight_value = sd[name].to(dtype=base_dtype)
+                    set_module_tensor_to_device(transformer, name, device=offload_device, dtype=base_dtype, value=weight_value)
                     loaded_count += 1
                     if loaded_count % 100 == 0:
                         log.info(f"   - Loaded {loaded_count}/{param_count} parameters")
@@ -722,6 +734,12 @@ class WanDistributedModelLoader:
                 pbar.update(1)
             
             log.info(f"✅ Successfully loaded {loaded_count} parameters")
+            
+            # Ensure the model is in the correct dtype
+            log.info("🔧 Converting model to target dtype...")
+            transformer = transformer.to(dtype=base_dtype)
+            log.info(f"✅ Model converted to {base_dtype}")
+            
         except Exception as e:
             log.error(f"❌ Failed to load model weights: {e}")
             raise
