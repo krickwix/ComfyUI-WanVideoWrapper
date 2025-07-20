@@ -1,0 +1,151 @@
+{
+  "last_node_id": 8,
+  "last_link_id": 7,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "XDitUSPConfig",
+      "pos": [100, 100],
+      "size": {"0": 300, "1": 400},
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": {
+        "num_gpus": 4,
+        "gpu_memory_fraction": 0.8,
+        "pipeline_parallel_size": 2,
+        "tensor_parallel_size": 2,
+        "data_parallel_size": 1,
+        "use_fp16": true,
+        "use_bf16": false,
+        "enable_activation_checkpointing": true,
+        "enable_gradient_checkpointing": false,
+        "max_batch_size": 1,
+        "max_sequence_length": 2048,
+        "overlap_p2p_comm": true,
+        "use_flash_attention": true,
+        "use_sdpa": true
+      },
+      "properties": {},
+      "widgets_values": [
+        4, 0.8, 2, 2, 1, true, false, true, false, 1, 2048, true, true, true
+      ]
+    },
+    {
+      "id": 2,
+      "type": "XDitUSPWanVideoModelLoader",
+      "pos": [500, 100],
+      "size": {"0": 300, "1": 300},
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": {
+        "model": "wan2.1_14b.safetensors",
+        "base_precision": "bf16",
+        "xdit_usp_config": ["1", 0],
+        "attention_mode": "sdpa",
+        "lora": null,
+        "vace_model": null
+      },
+      "properties": {},
+      "widgets_values": ["wan2.1_14b.safetensors", "bf16", "sdpa"]
+    },
+    {
+      "id": 3,
+      "type": "WanVideoVAELoader",
+      "pos": [500, 500],
+      "size": {"0": 300, "1": 100},
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": {
+        "model_name": "wan_vae.safetensors",
+        "precision": "bf16"
+      },
+      "properties": {},
+      "widgets_values": ["wan_vae.safetensors", "bf16"]
+    },
+    {
+      "id": 4,
+      "type": "LoadWanVideoT5TextEncoder",
+      "pos": [500, 700],
+      "size": {"0": 300, "1": 100},
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": {
+        "model_name": "t5-v1_1-xl.safetensors",
+        "precision": "bf16",
+        "load_device": "offload_device",
+        "quantization": "disabled"
+      },
+      "properties": {},
+      "widgets_values": ["t5-v1_1-xl.safetensors", "bf16", "offload_device", "disabled"]
+    },
+    {
+      "id": 5,
+      "type": "WanVideoSampler",
+      "pos": [900, 100],
+      "size": {"0": 300, "1": 400},
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": {
+        "model": ["2", 0],
+        "vae": ["3", 0],
+        "text_encoder": ["4", 0],
+        "prompt": "A beautiful sunset over the ocean, cinematic lighting, high quality",
+        "negative_prompt": "low quality, blurry, distorted",
+        "num_frames": 21,
+        "num_inference_steps": 25,
+        "guidance_scale": 7.5,
+        "width": 1024,
+        "height": 576,
+        "fps": 8,
+        "seed": 42
+      },
+      "properties": {},
+      "widgets_values": [
+        "A beautiful sunset over the ocean, cinematic lighting, high quality",
+        "low quality, blurry, distorted",
+        21, 25, 7.5, 1024, 576, 8, 42
+      ]
+    },
+    {
+      "id": 6,
+      "type": "SaveVideo",
+      "pos": [1300, 100],
+      "size": {"0": 300, "1": 100},
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": {
+        "video": ["5", 0],
+        "filename": "xdit_usp_output",
+        "fps": 8
+      },
+      "properties": {},
+      "widgets_values": ["xdit_usp_output", 8]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 2],
+    [2, 2, 0, 5, 0],
+    [3, 3, 0, 5, 1],
+    [4, 4, 0, 5, 2],
+    [5, 5, 0, 6, 0],
+    [6, 2, 0, 5, 0],
+    [7, 3, 0, 5, 1]
+  ],
+  "groups": [
+    {
+      "title": "XDit+USP Distributed Inference Example",
+      "bounding": [50, 50, 1600, 800],
+      "color": "#FF6B6B",
+      "bgcolor": "#FFE5E5"
+    }
+  ],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+} 

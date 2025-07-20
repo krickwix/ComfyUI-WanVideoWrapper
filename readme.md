@@ -15,6 +15,16 @@ Long answer: Due to the complexity of ComfyUI core code, and my lack of coding e
 
   `python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\requirements.txt`
 
+## XDit+USP Distributed Inference
+
+For multi-GPU distributed inference support, additional dependencies are required:
+
+```bash
+pip install xdit>=0.1.0 usp>=0.1.0
+```
+
+See [XDIT_USP_README.md](XDIT_USP_README.md) for detailed documentation on using distributed inference.
+
 ## Models
 
 https://huggingface.co/Kijai/WanVideo_comfy/tree/main
