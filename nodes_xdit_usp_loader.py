@@ -58,7 +58,7 @@ except ImportError:
 class WanDistributedConfig:
     """Configuration class for Wan2.1 distributed inference settings"""
     def __init__(self, 
-                 world_size=2,
+                 world_size=1,
                  rank=0,
                  backend="nccl",
                  init_method="env://",
@@ -112,42 +112,61 @@ class WanDistributedModel(WanVideoModel):
             raise ImportError("FSDP is required for distributed inference")
         
         self.distributed_config = config
+        self.is_distributed = False
         
-        # Initialize distributed environment
-        if not dist.is_initialized():
-            dist.init_process_group(
-                backend=config.backend,
-                init_method=config.init_method,
-                rank=config.rank,
-                world_size=config.world_size
-            )
-            self.is_distributed = True
-            log.info(f"Initialized distributed environment with {config.world_size} processes")
-        
-        # Setup context parallel if enabled
-        if config.use_context_parallel and XFUSER_AVAILABLE:
-            if config.ulysses_size > 1 or config.ring_size > 1:
-                assert config.ulysses_size * config.ring_size == config.world_size, \
-                    f"The number of ulysses_size and ring_size should be equal to the world size."
+        # Only initialize distributed environment if actually using multiple GPUs
+        if config.world_size > 1:
+            try:
+                # Initialize distributed environment
+                if not dist.is_initialized():
+                    # Set environment variables for single-node multi-GPU
+                    os.environ['MASTER_ADDR'] = 'localhost'
+                    os.environ['MASTER_PORT'] = '12355'
+                    
+                    dist.init_process_group(
+                        backend=config.backend,
+                        init_method="env://",
+                        rank=config.rank,
+                        world_size=config.world_size
+                    )
+                    self.is_distributed = True
+                    log.info(f"Initialized distributed environment with {config.world_size} processes")
                 
-                init_distributed_environment(
-                    rank=dist.get_rank(), 
-                    world_size=dist.get_world_size()
-                )
-                
-                initialize_model_parallel(
-                    sequence_parallel_degree=dist.get_world_size(),
-                    ring_degree=config.ring_size,
-                    ulysses_degree=config.ulysses_size,
-                )
-                log.info(f"Initialized context parallel: ulysses_size={config.ulysses_size}, ring_size={config.ring_size}")
+                # Setup context parallel if enabled
+                if config.use_context_parallel and XFUSER_AVAILABLE:
+                    if config.ulysses_size > 1 or config.ring_size > 1:
+                        assert config.ulysses_size * config.ring_size == config.world_size, \
+                            f"The number of ulysses_size and ring_size should be equal to the world size."
+                        
+                        init_distributed_environment(
+                            rank=dist.get_rank(), 
+                            world_size=dist.get_world_size()
+                        )
+                        
+                        initialize_model_parallel(
+                            sequence_parallel_degree=dist.get_world_size(),
+                            ring_degree=config.ring_size,
+                            ulysses_degree=config.ulysses_size,
+                        )
+                        log.info(f"Initialized context parallel: ulysses_size={config.ulysses_size}, ring_size={config.ring_size}")
+            except Exception as e:
+                log.warning(f"Failed to initialize distributed environment: {e}")
+                log.info("Falling back to single-GPU mode")
+                config.world_size = 1
+                config.rank = 0
+                self.is_distributed = False
         
-        # Apply FSDP if enabled
-        if config.use_fsdp:
-            self.fsdp_model = self._apply_fsdp(config)
-            log.info("Applied FSDP to model")
+        # Apply FSDP if enabled (only for multi-GPU)
+        if config.use_fsdp and config.world_size > 1:
+            try:
+                self.fsdp_model = self._apply_fsdp(config)
+                log.info("Applied FSDP to model")
+            except Exception as e:
+                log.warning(f"Failed to apply FSDP: {e}")
+                log.info("Falling back to non-FSDP mode")
+                config.use_fsdp = False
         
-        log.info(f"Setup complete: FSDP={config.use_fsdp}, Context Parallel={config.use_context_parallel}")
+        log.info(f"Setup complete: FSDP={config.use_fsdp}, Context Parallel={config.use_context_parallel}, World Size={config.world_size}")
 
     def _apply_fsdp(self, config):
         """Apply FSDP to the model"""
@@ -208,10 +227,10 @@ class WanDistributedConfigNode:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "world_size": ("INT", {"default": 2, "min": 1, "max": 8, "step": 1, "tooltip": "Number of processes/GPUs"}),
+                "world_size": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1, "tooltip": "Number of processes/GPUs (1 for single GPU)"}),
                 "rank": ("INT", {"default": 0, "min": 0, "max": 7, "step": 1, "tooltip": "Process rank (0 to world_size-1)"}),
                 "backend": (["nccl", "gloo"], {"default": "nccl", "tooltip": "Distributed backend"}),
-                "use_fsdp": ("BOOLEAN", {"default": True, "tooltip": "Use FSDP for model sharding"}),
+                "use_fsdp": ("BOOLEAN", {"default": False, "tooltip": "Use FSDP for model sharding (requires world_size > 1)"}),
                 "use_context_parallel": ("BOOLEAN", {"default": False, "tooltip": "Use context parallel (requires xfuser)"}),
                 "ulysses_size": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1, "tooltip": "Ulysses size for context parallel"}),
                 "ring_size": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1, "tooltip": "Ring size for context parallel"}),
