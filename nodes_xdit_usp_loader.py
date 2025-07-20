@@ -93,20 +93,18 @@ class WanDistributedConfig:
         self.sharding_strategy = sharding_strategy
         self.sync_module_states = sync_module_states
 
-class WanDistributedModel(comfy.model_base.BaseModel):
+# Import the regular WanVideoModel for compatibility
+from .nodes_model_loading import WanVideoModel
+
+class WanDistributedModel(WanVideoModel):
     """WanVideo model wrapper for Wan2.1 distributed inference"""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.pipeline = {}
         self.distributed_config = None
         self.fsdp_model = None
         self.is_distributed = False
 
-    def __getitem__(self, k):
-        return self.pipeline[k]
 
-    def __setitem__(self, k, v):
-        self.pipeline[k] = v
 
     def setup_distributed_inference(self, config: WanDistributedConfig):
         """Setup Wan2.1 distributed inference"""
@@ -288,7 +286,7 @@ class WanDistributedModelLoader:
             }
         }
 
-    RETURN_TYPES = ("WANDISTRIBUTEDMODEL",)
+    RETURN_TYPES = ("WANVIDEOMODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "loadmodel"
     CATEGORY = "WanVideoWrapper/Distributed"
