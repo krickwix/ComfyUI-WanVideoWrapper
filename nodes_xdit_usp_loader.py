@@ -108,21 +108,39 @@ class WanDistributedModel(WanVideoModel):
 
     def setup_distributed_inference(self, config: WanDistributedConfig):
         """Setup Wan2.1 distributed inference"""
+        log.info("🌐 Starting distributed inference setup...")
+        
         if not FSDP_AVAILABLE:
+            log.error("❌ FSDP not available!")
             raise ImportError("FSDP is required for distributed inference")
+        log.info("✅ FSDP is available")
         
         self.distributed_config = config
         self.is_distributed = False
         
+        log.info(f"📋 Distributed config:")
+        log.info(f"   - World size: {config.world_size}")
+        log.info(f"   - Rank: {config.rank}")
+        log.info(f"   - Backend: {config.backend}")
+        log.info(f"   - Use FSDP: {config.use_fsdp}")
+        log.info(f"   - Use context parallel: {config.use_context_parallel}")
+        log.info(f"   - Ulysses size: {config.ulysses_size}")
+        log.info(f"   - Ring size: {config.ring_size}")
+        
         # Only initialize distributed environment if actually using multiple GPUs
         if config.world_size > 1:
+            log.info("🚀 Initializing multi-GPU distributed environment...")
             try:
                 # Initialize distributed environment
                 if not dist.is_initialized():
+                    log.info("   - Setting environment variables...")
                     # Set environment variables for single-node multi-GPU
                     os.environ['MASTER_ADDR'] = 'localhost'
                     os.environ['MASTER_PORT'] = '12355'
+                    log.info(f"   - MASTER_ADDR: {os.environ['MASTER_ADDR']}")
+                    log.info(f"   - MASTER_PORT: {os.environ['MASTER_PORT']}")
                     
+                    log.info("   - Initializing process group...")
                     dist.init_process_group(
                         backend=config.backend,
                         init_method="env://",
@@ -130,69 +148,110 @@ class WanDistributedModel(WanVideoModel):
                         world_size=config.world_size
                     )
                     self.is_distributed = True
-                    log.info(f"Initialized distributed environment with {config.world_size} processes")
+                    log.info(f"✅ Initialized distributed environment with {config.world_size} processes")
+                else:
+                    log.info("ℹ️ Distributed environment already initialized")
                 
                 # Setup context parallel if enabled
                 if config.use_context_parallel and XFUSER_AVAILABLE:
+                    log.info("🔄 Setting up context parallel...")
                     if config.ulysses_size > 1 or config.ring_size > 1:
                         assert config.ulysses_size * config.ring_size == config.world_size, \
                             f"The number of ulysses_size and ring_size should be equal to the world size."
                         
+                        log.info("   - Initializing distributed environment for xfuser...")
                         init_distributed_environment(
                             rank=dist.get_rank(), 
                             world_size=dist.get_world_size()
                         )
                         
+                        log.info("   - Initializing model parallel...")
                         initialize_model_parallel(
                             sequence_parallel_degree=dist.get_world_size(),
                             ring_degree=config.ring_size,
                             ulysses_degree=config.ulysses_size,
                         )
-                        log.info(f"Initialized context parallel: ulysses_size={config.ulysses_size}, ring_size={config.ring_size}")
+                        log.info(f"✅ Initialized context parallel: ulysses_size={config.ulysses_size}, ring_size={config.ring_size}")
+                    else:
+                        log.info("ℹ️ Context parallel disabled (ulysses_size=1, ring_size=1)")
+                elif config.use_context_parallel and not XFUSER_AVAILABLE:
+                    log.warning("⚠️ Context parallel requested but xfuser not available")
+                else:
+                    log.info("ℹ️ Context parallel not enabled")
             except Exception as e:
-                log.warning(f"Failed to initialize distributed environment: {e}")
-                log.info("Falling back to single-GPU mode")
+                log.error(f"❌ Failed to initialize distributed environment: {e}")
+                log.info("🔄 Falling back to single-GPU mode")
                 config.world_size = 1
                 config.rank = 0
                 self.is_distributed = False
+        else:
+            log.info("ℹ️ Single-GPU mode, skipping distributed initialization")
         
         # Apply FSDP if enabled (only for multi-GPU)
         if config.use_fsdp and config.world_size > 1:
+            log.info("🔧 Applying FSDP to model...")
             try:
                 self.fsdp_model = self._apply_fsdp(config)
-                log.info("Applied FSDP to model")
+                log.info("✅ Applied FSDP to model")
             except Exception as e:
-                log.warning(f"Failed to apply FSDP: {e}")
-                log.info("Falling back to non-FSDP mode")
+                log.error(f"❌ Failed to apply FSDP: {e}")
+                log.info("🔄 Falling back to non-FSDP mode")
                 config.use_fsdp = False
+        else:
+            log.info("ℹ️ FSDP not enabled or single-GPU mode")
         
-        log.info(f"Setup complete: FSDP={config.use_fsdp}, Context Parallel={config.use_context_parallel}, World Size={config.world_size}")
+        log.info("=" * 60)
+        log.info("🎯 DISTRIBUTED INFERENCE SETUP COMPLETE")
+        log.info("=" * 60)
+        log.info(f"📊 Final configuration:")
+        log.info(f"   - FSDP: {config.use_fsdp}")
+        log.info(f"   - Context Parallel: {config.use_context_parallel}")
+        log.info(f"   - World Size: {config.world_size}")
+        log.info(f"   - Is Distributed: {self.is_distributed}")
+        log.info("=" * 60)
 
     def _apply_fsdp(self, config):
         """Apply FSDP to the model"""
+        log.info("🔧 Applying FSDP to model...")
+        
         if not hasattr(self, 'diffusion_model') or self.diffusion_model is None:
+            log.error("❌ Model must be loaded before applying FSDP")
             raise ValueError("Model must be loaded before applying FSDP")
+        
+        log.info(f"   - Param dtype: {config.param_dtype}")
+        log.info(f"   - Reduce dtype: {config.reduce_dtype}")
+        log.info(f"   - Buffer dtype: {config.buffer_dtype}")
+        log.info(f"   - Sharding strategy: {config.sharding_strategy}")
+        log.info(f"   - Sync module states: {config.sync_module_states}")
+        log.info(f"   - Current device: {torch.cuda.current_device()}")
         
         # Define auto wrap policy for transformer blocks
         def auto_wrap_policy(module):
             return module in self.diffusion_model.blocks
         
-        # Apply FSDP
-        fsdp_model = FSDP(
-            module=self.diffusion_model,
-            process_group=None,  # Use default process group
-            sharding_strategy=config.sharding_strategy,
-            auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=auto_wrap_policy),
-            mixed_precision=MixedPrecision(
-                param_dtype=config.param_dtype,
-                reduce_dtype=config.reduce_dtype,
-                buffer_dtype=config.buffer_dtype
-            ),
-            device_id=torch.cuda.current_device(),
-            sync_module_states=config.sync_module_states
-        )
+        log.info("   - Auto wrap policy: wrap transformer blocks")
         
-        return fsdp_model
+        try:
+            # Apply FSDP
+            fsdp_model = FSDP(
+                module=self.diffusion_model,
+                process_group=None,  # Use default process group
+                sharding_strategy=config.sharding_strategy,
+                auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=auto_wrap_policy),
+                mixed_precision=MixedPrecision(
+                    param_dtype=config.param_dtype,
+                    reduce_dtype=config.reduce_dtype,
+                    buffer_dtype=config.buffer_dtype
+                ),
+                device_id=torch.cuda.current_device(),
+                sync_module_states=config.sync_module_states
+            )
+            
+            log.info("✅ FSDP applied successfully")
+            return fsdp_model
+        except Exception as e:
+            log.error(f"❌ Failed to apply FSDP: {e}")
+            raise
 
     def forward_distributed(self, *args, **kwargs):
         """Forward pass using distributed inference"""
@@ -312,92 +371,193 @@ class WanDistributedModelLoader:
     DESCRIPTION = "Load WanVideo model with Wan2.1 distributed inference support"
 
     def loadmodel(self, model, base_precision, wan_distributed_config, attention_mode="sdpa", lora=None, vace_model=None):
+        log.info("=" * 80)
+        log.info("🚀 STARTING WAN2.1 DISTRIBUTED MODEL LOADER")
+        log.info("=" * 80)
+        log.info(f"📋 Input parameters:")
+        log.info(f"   - Model: {model}")
+        log.info(f"   - Base precision: {base_precision}")
+        log.info(f"   - Attention mode: {attention_mode}")
+        log.info(f"   - World size: {wan_distributed_config.world_size}")
+        log.info(f"   - Use FSDP: {wan_distributed_config.use_fsdp}")
+        log.info(f"   - Use context parallel: {wan_distributed_config.use_context_parallel}")
+        log.info(f"   - LoRA: {lora is not None}")
+        log.info(f"   - VACE model: {vace_model is not None}")
+        
+        # Check FSDP availability
+        log.info("🔍 Checking FSDP availability...")
         if not FSDP_AVAILABLE:
+            log.error("❌ FSDP not available!")
             raise ImportError("FSDP is required for distributed inference. Please install PyTorch with distributed support.")
+        log.info("✅ FSDP is available")
         
-        # Check if we have enough GPUs
+        # Check GPU availability
+        log.info("🔍 Checking GPU availability...")
         available_gpus = torch.cuda.device_count()
-        if available_gpus < wan_distributed_config.world_size:
-            raise ValueError(f"Requested {wan_distributed_config.world_size} GPUs but only {available_gpus} are available")
+        log.info(f"   - Available GPUs: {available_gpus}")
+        log.info(f"   - Requested GPUs: {wan_distributed_config.world_size}")
         
-        log.info(f"Loading WanVideo model with Wan2.1 distributed inference on {wan_distributed_config.world_size} GPUs")
+        if available_gpus < wan_distributed_config.world_size:
+            log.error(f"❌ Not enough GPUs! Requested {wan_distributed_config.world_size} but only {available_gpus} available")
+            raise ValueError(f"Requested {wan_distributed_config.world_size} GPUs but only {available_gpus} are available")
+        log.info("✅ GPU count is sufficient")
+        
+        log.info(f"🎯 Loading WanVideo model with Wan2.1 distributed inference on {wan_distributed_config.world_size} GPUs")
         
         # Unload existing models
+        log.info("🧹 Unloading existing models...")
         mm.unload_all_models()
         mm.cleanup_models()
         mm.soft_empty_cache()
+        log.info("✅ Models unloaded and cache cleared")
         
         # Set up device and dtype
+        log.info("⚙️ Setting up devices and data types...")
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
         base_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[base_precision]
+        log.info(f"   - Main device: {device}")
+        log.info(f"   - Offload device: {offload_device}")
+        log.info(f"   - Base dtype: {base_dtype}")
+        log.info("✅ Device setup complete")
         
         # Load model state dict
+        log.info("📁 Loading model state dict...")
         model_path = folder_paths.get_full_path_or_raise("diffusion_models", model)
-        sd = load_torch_file(model_path, device=offload_device, safe_load=True)
+        log.info(f"   - Model path: {model_path}")
+        log.info(f"   - Loading to device: {offload_device}")
+        
+        try:
+            sd = load_torch_file(model_path, device=offload_device, safe_load=True)
+            log.info(f"✅ Model loaded successfully. State dict keys: {len(sd)}")
+        except Exception as e:
+            log.error(f"❌ Failed to load model: {e}")
+            raise
         
         # Handle VACE model if provided
         if vace_model is not None:
-            vace_sd = load_torch_file(vace_model["path"], device=offload_device, safe_load=True)
-            sd.update(vace_sd)
+            log.info("🔧 Loading VACE model...")
+            try:
+                vace_sd = load_torch_file(vace_model["path"], device=offload_device, safe_load=True)
+                sd.update(vace_sd)
+                log.info(f"✅ VACE model loaded. Total keys: {len(sd)}")
+            except Exception as e:
+                log.error(f"❌ Failed to load VACE model: {e}")
+                raise
+        else:
+            log.info("ℹ️ No VACE model provided")
         
         # Standardize state dict keys
+        log.info("🔧 Standardizing state dict keys...")
         first_key = next(iter(sd))
+        log.info(f"   - First key: {first_key}")
+        
         if first_key.startswith("model.diffusion_model."):
+            log.info("   - Detected 'model.diffusion_model.' prefix, removing...")
             new_sd = {}
             for key, value in sd.items():
                 new_key = key.replace("model.diffusion_model.", "", 1)
                 new_sd[new_key] = value
             sd = new_sd
+            log.info("✅ Removed 'model.diffusion_model.' prefix")
         elif first_key.startswith("model."):
+            log.info("   - Detected 'model.' prefix, removing...")
             new_sd = {}
             for key, value in sd.items():
                 new_key = key.replace("model.", "", 1)
                 new_sd[new_key] = value
             sd = new_sd
+            log.info("✅ Removed 'model.' prefix")
+        else:
+            log.info("   - No prefix detected, keys are already standardized")
+        
+        log.info(f"   - Final key count: {len(sd)}")
         
         # Validate model
+        log.info("🔍 Validating model structure...")
         if not "patch_embedding.weight" in sd:
+            log.error("❌ Invalid WanVideo model: missing 'patch_embedding.weight'")
             raise ValueError("Invalid WanVideo model selected")
+        log.info("✅ Model validation passed")
         
         # Extract model configuration
-        dim = sd["patch_embedding.weight"].shape[0]
-        in_features = sd["blocks.0.self_attn.k.weight"].shape[1]
-        out_features = sd["blocks.0.self_attn.k.weight"].shape[0]
-        in_channels = sd["patch_embedding.weight"].shape[1]
-        ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
-        ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
+        log.info("📐 Extracting model configuration...")
+        try:
+            dim = sd["patch_embedding.weight"].shape[0]
+            in_features = sd["blocks.0.self_attn.k.weight"].shape[1]
+            out_features = sd["blocks.0.self_attn.k.weight"].shape[0]
+            in_channels = sd["patch_embedding.weight"].shape[1]
+            ffn_dim = sd["blocks.0.ffn.0.bias"].shape[0]
+            ffn2_dim = sd["blocks.0.ffn.2.weight"].shape[1]
+            
+            log.info(f"   - Dimension: {dim}")
+            log.info(f"   - In features: {in_features}")
+            log.info(f"   - Out features: {out_features}")
+            log.info(f"   - In channels: {in_channels}")
+            log.info(f"   - FFN dim: {ffn_dim}")
+            log.info(f"   - FFN2 dim: {ffn2_dim}")
+            log.info("✅ Model configuration extracted")
+        except Exception as e:
+            log.error(f"❌ Failed to extract model configuration: {e}")
+            raise
         
         # Determine model type
+        log.info("🏷️ Determining model type...")
         if not "text_embedding.0.weight" in sd:
             model_type = "no_cross_attn"
+            log.info("   - Model type: no_cross_attn (no text embedding)")
         elif "model_type.Wan2_1-FLF2V-14B-720P" in sd or "img_emb.emb_pos" in sd or "flf2v" in model.lower():
             model_type = "fl2v"
+            log.info("   - Model type: fl2v (FLF2V model)")
         elif in_channels in [36, 48]:
             model_type = "i2v"
+            log.info(f"   - Model type: i2v (in_channels: {in_channels})")
         elif in_channels == 16:
             model_type = "t2v"
+            log.info("   - Model type: t2v (in_channels: 16)")
         elif "control_adapter.conv.weight" in sd:
             model_type = "t2v"
+            log.info("   - Model type: t2v (with control adapter)")
+        else:
+            model_type = "unknown"
+            log.warning(f"   - Model type: unknown (in_channels: {in_channels})")
         
         num_heads = 40 if dim == 5120 else 12
         num_layers = 40 if dim == 5120 else 30
+        log.info(f"   - Num heads: {num_heads}")
+        log.info(f"   - Num layers: {num_layers}")
+        log.info(f"✅ Model type determined: {model_type}")
         
         # Handle VACE layers
+        log.info("🔧 Handling VACE layers...")
         vace_layers, vace_in_dim = None, None
         if "vace_blocks.0.after_proj.weight" in sd:
+            log.info("   - VACE blocks detected in model")
             if in_channels != 16:
+                log.error("❌ VACE only works properly with T2V models")
                 raise ValueError("VACE only works properly with T2V models.")
             model_type = "t2v"
             if dim == 5120:
                 vace_layers = [0, 5, 10, 15, 20, 25, 30, 35]
+                log.info("   - Using 14B VACE layers: [0, 5, 10, 15, 20, 25, 30, 35]")
             else:
                 vace_layers = [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
+                log.info("   - Using 1.3B VACE layers: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]")
             vace_in_dim = 96
+            log.info(f"   - VACE input dimension: {vace_in_dim}")
+            log.info("✅ VACE layers configured")
+        else:
+            log.info("ℹ️ No VACE blocks detected")
         
-        log.info(f"Model type: {model_type}, num_heads: {num_heads}, num_layers: {num_layers}")
+        log.info(f"📊 Final model configuration:")
+        log.info(f"   - Model type: {model_type}")
+        log.info(f"   - Num heads: {num_heads}")
+        log.info(f"   - Num layers: {num_layers}")
+        log.info(f"   - VACE layers: {vace_layers}")
+        log.info(f"   - VACE in dim: {vace_in_dim}")
         
         # Create transformer configuration
+        log.info("⚙️ Creating transformer configuration...")
         transformer_config = {
             "dim": dim,
             "in_features": in_features,
@@ -424,62 +584,130 @@ class WanDistributedModelLoader:
             "add_control_adapter": True if "control_adapter.conv.weight" in sd else False,
         }
         
+        log.info(f"   - Attention mode: {attention_mode}")
+        log.info(f"   - Inject sample info: {transformer_config['inject_sample_info']}")
+        log.info(f"   - Add ref conv: {transformer_config['add_ref_conv']}")
+        log.info(f"   - Add control adapter: {transformer_config['add_control_adapter']}")
+        log.info("✅ Transformer configuration created")
+        
         # Create WanVideo model
-        with init_empty_weights():
-            transformer = WanModel(**transformer_config)
-        transformer.eval()
+        log.info("🏗️ Creating WanVideo model with empty weights...")
+        try:
+            with init_empty_weights():
+                transformer = WanModel(**transformer_config)
+            transformer.eval()
+            log.info("✅ WanVideo model created successfully")
+        except Exception as e:
+            log.error(f"❌ Failed to create WanVideo model: {e}")
+            raise
         
         # Create ComfyUI model wrapper
-        comfy_model = WanDistributedModel(
-            WanVideoModelConfig(base_dtype),
-            model_type=comfy.model_base.ModelType.FLOW,
-            device=device,
-        )
-        
-        comfy_model.diffusion_model = transformer
-        comfy_model.load_device = offload_device
+        log.info("🎭 Creating ComfyUI model wrapper...")
+        try:
+            comfy_model = WanDistributedModel(
+                WanVideoModelConfig(base_dtype),
+                model_type=comfy.model_base.ModelType.FLOW,
+                device=device,
+            )
+            
+            comfy_model.diffusion_model = transformer
+            comfy_model.load_device = offload_device
+            log.info("✅ ComfyUI model wrapper created")
+        except Exception as e:
+            log.error(f"❌ Failed to create ComfyUI model wrapper: {e}")
+            raise
         
         # Load model weights
-        log.info("Loading model weights...")
-        param_count = sum(1 for _ in transformer.named_parameters())
-        pbar = ProgressBar(param_count)
-        
-        for name, param in tqdm(transformer.named_parameters(), 
-                desc=f"Loading transformer parameters", 
-                total=param_count,
-                leave=True):
-            set_module_tensor_to_device(transformer, name, device=offload_device, dtype=base_dtype, value=sd[name])
-            pbar.update(1)
+        log.info("⚖️ Loading model weights...")
+        try:
+            param_count = sum(1 for _ in transformer.named_parameters())
+            log.info(f"   - Total parameters to load: {param_count}")
+            pbar = ProgressBar(param_count)
+            
+            loaded_count = 0
+            for name, param in tqdm(transformer.named_parameters(), 
+                    desc=f"Loading transformer parameters", 
+                    total=param_count,
+                    leave=True):
+                try:
+                    set_module_tensor_to_device(transformer, name, device=offload_device, dtype=base_dtype, value=sd[name])
+                    loaded_count += 1
+                    if loaded_count % 100 == 0:
+                        log.info(f"   - Loaded {loaded_count}/{param_count} parameters")
+                except Exception as e:
+                    log.error(f"❌ Failed to load parameter {name}: {e}")
+                    raise
+                pbar.update(1)
+            
+            log.info(f"✅ Successfully loaded {loaded_count} parameters")
+        except Exception as e:
+            log.error(f"❌ Failed to load model weights: {e}")
+            raise
         
         # Setup distributed inference
-        comfy_model.setup_distributed_inference(wan_distributed_config)
+        log.info("🌐 Setting up distributed inference...")
+        try:
+            comfy_model.setup_distributed_inference(wan_distributed_config)
+            log.info("✅ Distributed inference setup complete")
+        except Exception as e:
+            log.error(f"❌ Failed to setup distributed inference: {e}")
+            raise
         
         # Handle LoRA if provided
         if lora is not None:
-            log.warning("LoRA support in distributed inference is experimental")
+            log.warning("⚠️ LoRA support in distributed inference is experimental")
             # TODO: Implement LoRA support for distributed inference
+        else:
+            log.info("ℹ️ No LoRA provided")
         
         # Create model patcher
-        patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
-        patcher.model.is_patched = True
+        log.info("🔧 Creating model patcher...")
+        try:
+            patcher = comfy.model_patcher.ModelPatcher(comfy_model, device, offload_device)
+            patcher.model.is_patched = True
+            log.info("✅ Model patcher created")
+        except Exception as e:
+            log.error(f"❌ Failed to create model patcher: {e}")
+            raise
         
         # Set model metadata
-        patcher.model["dtype"] = base_dtype
-        patcher.model["base_path"] = model_path
-        patcher.model["model_name"] = model
-        patcher.model["manual_offloading"] = True
-        patcher.model["quantization"] = "disabled"
-        patcher.model["auto_cpu_offload"] = False
-        patcher.model["control_lora"] = False
-        patcher.model["distributed_inference"] = True
-        patcher.model["distributed_config"] = wan_distributed_config
+        log.info("📝 Setting model metadata...")
+        try:
+            patcher.model["dtype"] = base_dtype
+            patcher.model["base_path"] = model_path
+            patcher.model["model_name"] = model
+            patcher.model["manual_offloading"] = True
+            patcher.model["quantization"] = "disabled"
+            patcher.model["auto_cpu_offload"] = False
+            patcher.model["control_lora"] = False
+            patcher.model["distributed_inference"] = True
+            patcher.model["distributed_config"] = wan_distributed_config
+            log.info("✅ Model metadata set")
+        except Exception as e:
+            log.error(f"❌ Failed to set model metadata: {e}")
+            raise
         
         # Clean up
-        del sd
-        gc.collect()
-        mm.soft_empty_cache()
+        log.info("🧹 Cleaning up...")
+        try:
+            del sd
+            gc.collect()
+            mm.soft_empty_cache()
+            log.info("✅ Cleanup complete")
+        except Exception as e:
+            log.warning(f"⚠️ Cleanup warning: {e}")
         
-        log.info("Successfully loaded WanVideo model with Wan2.1 distributed inference")
+        log.info("=" * 80)
+        log.info("🎉 SUCCESSFULLY LOADED WANVIDEO MODEL WITH WAN2.1 DISTRIBUTED INFERENCE")
+        log.info("=" * 80)
+        log.info(f"📊 Summary:")
+        log.info(f"   - Model: {model}")
+        log.info(f"   - Type: {model_type}")
+        log.info(f"   - GPUs: {wan_distributed_config.world_size}")
+        log.info(f"   - FSDP: {wan_distributed_config.use_fsdp}")
+        log.info(f"   - Context Parallel: {wan_distributed_config.use_context_parallel}")
+        log.info(f"   - Parameters loaded: {loaded_count}")
+        log.info("=" * 80)
         
         return (patcher,)
 
