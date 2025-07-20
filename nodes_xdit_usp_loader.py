@@ -167,9 +167,10 @@ class WanDistributedModel(WanVideoModel):
             log.info("🔧 Applying multi-GPU sharding...")
             try:
                 if config.use_fsdp and hasattr(self, 'is_single_server') and self.is_single_server:
-                    # Use simplified FSDP for single-server
-                    self.fsdp_model = self._apply_single_server_fsdp(config)
-                    log.info("✅ Applied single-server FSDP to model")
+                    # For single-server, use device sharding instead of FSDP
+                    log.info("   - Single-server mode: using device sharding instead of FSDP")
+                    self._apply_device_sharding(config)
+                    log.info("✅ Applied device sharding to model")
                 elif config.use_fsdp:
                     # Use full FSDP for multi-server
                     self.fsdp_model = self._apply_fsdp(config)
@@ -253,11 +254,27 @@ class WanDistributedModel(WanVideoModel):
         log.info(f"   - Sharding strategy: {config.sharding_strategy}")
         
         try:
-            # Create a simplified FSDP wrapper that works in single process
-            # This will shard the model across GPUs without spawning processes
+            # Initialize a simple process group for single-server FSDP
+            log.info("   - Initializing single-server process group...")
+            
+            # Set environment variables for single-node setup
+            os.environ['MASTER_ADDR'] = 'localhost'
+            os.environ['MASTER_PORT'] = '12355'
+            
+            # Initialize process group with single process
+            if not dist.is_initialized():
+                dist.init_process_group(
+                    backend=config.backend,
+                    init_method="env://",
+                    rank=0,
+                    world_size=1
+                )
+                log.info("   - Process group initialized for single-server FSDP")
+            
+            # Create FSDP wrapper
             fsdp_model = FSDP(
                 module=self.diffusion_model,
-                process_group=None,  # No process group for single-server
+                process_group=None,  # Use default process group
                 sharding_strategy=config.sharding_strategy,
                 auto_wrap_policy=None,  # No auto wrap for simplicity
                 mixed_precision=MixedPrecision(
@@ -276,7 +293,7 @@ class WanDistributedModel(WanVideoModel):
             raise
 
     def _apply_device_sharding(self, config):
-        """Apply simple device sharding across GPUs"""
+        """Apply comprehensive device sharding across GPUs"""
         log.info("🔧 Applying device sharding...")
         
         if not hasattr(self, 'diffusion_model') or self.diffusion_model is None:
@@ -286,13 +303,11 @@ class WanDistributedModel(WanVideoModel):
         log.info(f"   - Sharding across {len(self.gpu_devices)} GPUs: {self.gpu_devices}")
         
         try:
-            # Move different parts of the model to different GPUs
-            # This is a simplified approach that doesn't require process spawning
             model = self.diffusion_model
             
-            # Shard transformer blocks across GPUs
+            # Shard transformer blocks across GPUs (most memory intensive)
             if hasattr(model, 'blocks') and len(model.blocks) > 0:
-                blocks_per_gpu = len(model.blocks) // len(self.gpu_devices)
+                blocks_per_gpu = max(1, len(model.blocks) // len(self.gpu_devices))
                 log.info(f"   - Sharding {len(model.blocks)} blocks across {len(self.gpu_devices)} GPUs")
                 log.info(f"   - Blocks per GPU: {blocks_per_gpu}")
                 
@@ -302,17 +317,41 @@ class WanDistributedModel(WanVideoModel):
                         gpu_idx = len(self.gpu_devices) - 1
                     device = f"cuda:{self.gpu_devices[gpu_idx]}"
                     block.to(device)
-                    log.info(f"   - Block {i} -> {device}")
+                    if i % 5 == 0:  # Log every 5th block to avoid spam
+                        log.info(f"   - Block {i} -> {device}")
             
-            # Move other components to first GPU
+            # Distribute other components across GPUs
+            components = []
             if hasattr(model, 'patch_embedding'):
-                model.patch_embedding.to(f"cuda:{self.gpu_devices[0]}")
+                components.append(('patch_embedding', model.patch_embedding))
             if hasattr(model, 'pos_embedding'):
-                model.pos_embedding.to(f"cuda:{self.gpu_devices[0]}")
+                components.append(('pos_embedding', model.pos_embedding))
             if hasattr(model, 'output_proj'):
-                model.output_proj.to(f"cuda:{self.gpu_devices[0]}")
+                components.append(('output_proj', model.output_proj))
+            if hasattr(model, 'add_conv_in'):
+                components.append(('add_conv_in', model.add_conv_in))
+            if hasattr(model, 'add_proj'):
+                components.append(('add_proj', model.add_proj))
+            if hasattr(model, 'attn_conv_in'):
+                components.append(('attn_conv_in', model.attn_conv_in))
+            if hasattr(model, 'ref_conv'):
+                components.append(('ref_conv', model.ref_conv))
+            if hasattr(model, 'control_adapter'):
+                components.append(('control_adapter', model.control_adapter))
+            
+            # Distribute components across GPUs
+            for i, (name, component) in enumerate(components):
+                gpu_idx = i % len(self.gpu_devices)
+                device = f"cuda:{self.gpu_devices[gpu_idx]}"
+                component.to(device)
+                log.info(f"   - {name} -> {device}")
+            
+            # Set the main device for the model
+            model.main_device = f"cuda:{self.gpu_devices[0]}"
+            log.info(f"   - Main device set to: {model.main_device}")
             
             log.info("✅ Device sharding applied successfully")
+            log.info(f"   - Model distributed across {len(self.gpu_devices)} GPUs")
             
         except Exception as e:
             log.error(f"❌ Failed to apply device sharding: {e}")
