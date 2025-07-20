@@ -15,15 +15,21 @@ Long answer: Due to the complexity of ComfyUI core code, and my lack of coding e
 
   `python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-WanVideoWrapper\requirements.txt`
 
-## XDit+USP Distributed Inference
+## Wan2.1 Distributed Inference
 
-For multi-GPU distributed inference support, additional dependencies are required:
+For multi-GPU distributed inference support using the official Wan2.1 distributed components (FSDP, xdit, USP), additional dependencies are required:
 
 ```bash
-pip install xdit>=0.1.0 usp>=0.1.0
+pip install torch>=2.0.0 xfuser>=0.1.0
 ```
 
-See [XDIT_USP_README.md](XDIT_USP_README.md) for detailed documentation on using distributed inference.
+Or use the installation script:
+
+```bash
+./install_wan_distributed.sh
+```
+
+See [WAN_DISTRIBUTED_README.md](WAN_DISTRIBUTED_README.md) for detailed documentation on using distributed inference.
 
 ## Models
 

@@ -1,0 +1,111 @@
+{
+  "last_node_id": 8,
+  "last_link_id": 7,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "WanDistributedConfig",
+      "pos": [100, 100],
+      "size": {"0": 300, "1": 400},
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": {
+        "world_size": 2,
+        "rank": 0,
+        "backend": "nccl",
+        "use_fsdp": true,
+        "use_context_parallel": false,
+        "ulysses_size": 1,
+        "ring_size": 1,
+        "t5_fsdp": false,
+        "dit_fsdp": false,
+        "use_usp": false,
+        "t5_cpu": false,
+        "param_dtype": "bfloat16",
+        "reduce_dtype": "float32",
+        "buffer_dtype": "float32",
+        "sharding_strategy": "FULL_SHARD",
+        "sync_module_states": true
+      },
+      "properties": {},
+      "widgets_values": [
+        2, 0, "nccl", true, false, 1, 1, false, false, false, false, "bfloat16", "float32", "float32", "FULL_SHARD", true
+      ]
+    },
+    {
+      "id": 2,
+      "type": "WanDistributedModelLoader",
+      "pos": [500, 100],
+      "size": {"0": 300, "1": 300},
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": {
+        "model": "wan2.1_14b.safetensors",
+        "base_precision": "bf16",
+        "wan_distributed_config": ["WANDISTRIBUTEDCONFIG", 1],
+        "attention_mode": "sdpa",
+        "lora": null,
+        "vace_model": null
+      },
+      "properties": {},
+      "widgets_values": ["wan2.1_14b.safetensors", "bf16", "sdpa"]
+    },
+    {
+      "id": 3,
+      "type": "WanT2V",
+      "pos": [900, 100],
+      "size": {"0": 300, "1": 400},
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": {
+        "model": ["WANDISTRIBUTEDMODEL", 2],
+        "prompt": "A beautiful sunset over the ocean with waves crashing on the shore",
+        "negative_prompt": "",
+        "width": 1024,
+        "height": 576,
+        "num_frames": 81,
+        "num_steps": 50,
+        "guidance_scale": 5.0,
+        "seed": 42
+      },
+      "properties": {},
+      "widgets_values": [
+        "A beautiful sunset over the ocean with waves crashing on the shore",
+        "",
+        1024,
+        576,
+        81,
+        50,
+        5.0,
+        42
+      ]
+    },
+    {
+      "id": 4,
+      "type": "SaveVideo",
+      "pos": [1300, 100],
+      "size": {"0": 200, "1": 100},
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": {
+        "video": ["VIDEO", 3],
+        "filename_prefix": "wan_distributed_output"
+      },
+      "properties": {},
+      "widgets_values": ["wan_distributed_output"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 2],
+    [2, 2, 0, 3, 0],
+    [3, 3, 0, 4, 0]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+} 

@@ -29,65 +29,78 @@ try:
 except:
     PromptServer = None
 
-# Import xdit and USP dependencies
+# Import Wan2.1 distributed components
 try:
-    import xdit
-    from xdit import XDitModel
-    from xdit.config import XDitConfig
-    from xdit.utils import get_xdit_config
-    XDIT_AVAILABLE = True
+    import torch.distributed as dist
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+    from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+    from functools import partial
+    FSDP_AVAILABLE = True
 except ImportError:
-    XDIT_AVAILABLE = False
-    log.warning("xdit not available. Please install xdit for distributed inference support.")
+    FSDP_AVAILABLE = False
+    log.warning("FSDP not available. Please install PyTorch with distributed support.")
 
 try:
-    import usp
-    from usp import USPDistributedInference
-    USP_AVAILABLE = True
+    from xfuser.core.distributed import (
+        init_distributed_environment,
+        initialize_model_parallel,
+        get_sequence_parallel_rank,
+        get_sequence_parallel_world_size,
+        get_sp_group,
+    )
+    from xfuser.core.long_ctx_attention import xFuserLongContextAttention
+    XFUSER_AVAILABLE = True
 except ImportError:
-    USP_AVAILABLE = False
-    log.warning("usp not available. Please install usp for distributed inference support.")
+    XFUSER_AVAILABLE = False
+    log.warning("xfuser not available. Please install xfuser for context parallel support.")
 
-class XDitUSPConfig:
-    """Configuration class for xdit+USP distributed inference settings"""
+class WanDistributedConfig:
+    """Configuration class for Wan2.1 distributed inference settings"""
     def __init__(self, 
-                 num_gpus=2,
-                 gpu_memory_fraction=0.9,
-                 pipeline_parallel_size=1,
-                 tensor_parallel_size=1,
-                 data_parallel_size=1,
-                 use_fp16=True,
-                 use_bf16=False,
-                 enable_activation_checkpointing=True,
-                 enable_gradient_checkpointing=False,
-                 max_batch_size=1,
-                 max_sequence_length=2048,
-                 overlap_p2p_comm=True,
-                 use_flash_attention=True,
-                 use_sdpa=True):
-        self.num_gpus = num_gpus
-        self.gpu_memory_fraction = gpu_memory_fraction
-        self.pipeline_parallel_size = pipeline_parallel_size
-        self.tensor_parallel_size = tensor_parallel_size
-        self.data_parallel_size = data_parallel_size
-        self.use_fp16 = use_fp16
-        self.use_bf16 = use_bf16
-        self.enable_activation_checkpointing = enable_activation_checkpointing
-        self.enable_gradient_checkpointing = enable_gradient_checkpointing
-        self.max_batch_size = max_batch_size
-        self.max_sequence_length = max_sequence_length
-        self.overlap_p2p_comm = overlap_p2p_comm
-        self.use_flash_attention = use_flash_attention
-        self.use_sdpa = use_sdpa
+                 world_size=2,
+                 rank=0,
+                 backend="nccl",
+                 init_method="env://",
+                 use_fsdp=False,
+                 use_context_parallel=False,
+                 ulysses_size=1,
+                 ring_size=1,
+                 t5_fsdp=False,
+                 dit_fsdp=False,
+                 use_usp=False,
+                 t5_cpu=False,
+                 param_dtype=torch.bfloat16,
+                 reduce_dtype=torch.float32,
+                 buffer_dtype=torch.float32,
+                 sharding_strategy=ShardingStrategy.FULL_SHARD,
+                 sync_module_states=True):
+        self.world_size = world_size
+        self.rank = rank
+        self.backend = backend
+        self.init_method = init_method
+        self.use_fsdp = use_fsdp
+        self.use_context_parallel = use_context_parallel
+        self.ulysses_size = ulysses_size
+        self.ring_size = ring_size
+        self.t5_fsdp = t5_fsdp
+        self.dit_fsdp = dit_fsdp
+        self.use_usp = use_usp
+        self.t5_cpu = t5_cpu
+        self.param_dtype = param_dtype
+        self.reduce_dtype = reduce_dtype
+        self.buffer_dtype = buffer_dtype
+        self.sharding_strategy = sharding_strategy
+        self.sync_module_states = sync_module_states
 
-class XDitUSPWanVideoModel(comfy.model_base.BaseModel):
-    """WanVideo model wrapper for xdit+USP distributed inference"""
+class WanDistributedModel(comfy.model_base.BaseModel):
+    """WanVideo model wrapper for Wan2.1 distributed inference"""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.pipeline = {}
-        self.xdit_model = None
-        self.usp_inference = None
         self.distributed_config = None
+        self.fsdp_model = None
+        self.is_distributed = False
 
     def __getitem__(self, k):
         return self.pipeline[k]
@@ -95,175 +108,171 @@ class XDitUSPWanVideoModel(comfy.model_base.BaseModel):
     def __setitem__(self, k, v):
         self.pipeline[k] = v
 
-    def setup_distributed_inference(self, config: XDitUSPConfig):
-        """Setup xdit+USP distributed inference"""
-        if not XDIT_AVAILABLE:
-            raise ImportError("xdit is required for distributed inference")
-        if not USP_AVAILABLE:
-            raise ImportError("usp is required for distributed inference")
+    def setup_distributed_inference(self, config: WanDistributedConfig):
+        """Setup Wan2.1 distributed inference"""
+        if not FSDP_AVAILABLE:
+            raise ImportError("FSDP is required for distributed inference")
         
         self.distributed_config = config
         
-        # Initialize xdit model
-        xdit_config = XDitConfig(
-            num_layers=self.diffusion_model.num_layers,
-            hidden_size=self.diffusion_model.dim,
-            num_attention_heads=self.diffusion_model.num_heads,
-            intermediate_size=self.diffusion_model.ffn_dim,
-            max_position_embeddings=config.max_sequence_length,
-            use_flash_attention=config.use_flash_attention,
-            use_sdpa=config.use_sdpa,
-            pipeline_parallel_size=config.pipeline_parallel_size,
-            tensor_parallel_size=config.tensor_parallel_size,
-            data_parallel_size=config.data_parallel_size,
-            enable_activation_checkpointing=config.enable_activation_checkpointing,
-            enable_gradient_checkpointing=config.enable_gradient_checkpointing,
-            overlap_p2p_comm=config.overlap_p2p_comm
-        )
+        # Initialize distributed environment
+        if not dist.is_initialized():
+            dist.init_process_group(
+                backend=config.backend,
+                init_method=config.init_method,
+                rank=config.rank,
+                world_size=config.world_size
+            )
+            self.is_distributed = True
+            log.info(f"Initialized distributed environment with {config.world_size} processes")
         
-        self.xdit_model = XDitModel(xdit_config)
+        # Setup context parallel if enabled
+        if config.use_context_parallel and XFUSER_AVAILABLE:
+            if config.ulysses_size > 1 or config.ring_size > 1:
+                assert config.ulysses_size * config.ring_size == config.world_size, \
+                    f"The number of ulysses_size and ring_size should be equal to the world size."
+                
+                init_distributed_environment(
+                    rank=dist.get_rank(), 
+                    world_size=dist.get_world_size()
+                )
+                
+                initialize_model_parallel(
+                    sequence_parallel_degree=dist.get_world_size(),
+                    ring_degree=config.ring_size,
+                    ulysses_degree=config.ulysses_size,
+                )
+                log.info(f"Initialized context parallel: ulysses_size={config.ulysses_size}, ring_size={config.ring_size}")
         
-        # Initialize USP distributed inference
-        self.usp_inference = USPDistributedInference(
-            model=self.xdit_model,
-            num_gpus=config.num_gpus,
-            gpu_memory_fraction=config.gpu_memory_fraction,
-            max_batch_size=config.max_batch_size,
-            use_fp16=config.use_fp16,
-            use_bf16=config.use_bf16
-        )
+        # Apply FSDP if enabled
+        if config.use_fsdp:
+            self.fsdp_model = self._apply_fsdp(config)
+            log.info("Applied FSDP to model")
         
-        log.info(f"Initialized xdit+USP distributed inference with {config.num_gpus} GPUs")
+        log.info(f"Setup complete: FSDP={config.use_fsdp}, Context Parallel={config.use_context_parallel}")
 
-    def convert_wan_to_xdit(self):
-        """Convert WanVideo model weights to xdit format"""
-        if self.xdit_model is None:
-            raise ValueError("xdit model not initialized")
+    def _apply_fsdp(self, config):
+        """Apply FSDP to the model"""
+        if not hasattr(self, 'diffusion_model') or self.diffusion_model is None:
+            raise ValueError("Model must be loaded before applying FSDP")
         
-        # Convert WanVideo model weights to xdit format
-        wan_state_dict = self.diffusion_model.state_dict()
-        xdit_state_dict = {}
+        # Define auto wrap policy for transformer blocks
+        def auto_wrap_policy(module):
+            return module in self.diffusion_model.blocks
         
-        # Mapping from WanVideo to xdit parameter names
-        param_mapping = {
-            'patch_embedding.weight': 'embeddings.patch_embedding.weight',
-            'patch_embedding.bias': 'embeddings.patch_embedding.bias',
-            'time_embedding.0.weight': 'embeddings.time_embedding.weight',
-            'time_embedding.0.bias': 'embeddings.time_embedding.bias',
-            'time_embedding.2.weight': 'embeddings.time_projection.weight',
-            'time_embedding.2.bias': 'embeddings.time_projection.bias',
-        }
+        # Apply FSDP
+        fsdp_model = FSDP(
+            module=self.diffusion_model,
+            process_group=None,  # Use default process group
+            sharding_strategy=config.sharding_strategy,
+            auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=auto_wrap_policy),
+            mixed_precision=MixedPrecision(
+                param_dtype=config.param_dtype,
+                reduce_dtype=config.reduce_dtype,
+                buffer_dtype=config.buffer_dtype
+            ),
+            device_id=torch.cuda.current_device(),
+            sync_module_states=config.sync_module_states
+        )
         
-        # Add transformer blocks mapping
-        for i in range(self.diffusion_model.num_layers):
-            block_prefix = f'blocks.{i}.'
-            xdit_block_prefix = f'encoder.layers.{i}.'
-            
-            # Self attention
-            param_mapping.update({
-                f'{block_prefix}self_attn.q.weight': f'{xdit_block_prefix}self_attn.q_proj.weight',
-                f'{block_prefix}self_attn.k.weight': f'{xdit_block_prefix}self_attn.k_proj.weight',
-                f'{block_prefix}self_attn.v.weight': f'{xdit_block_prefix}self_attn.v_proj.weight',
-                f'{block_prefix}self_attn.out.weight': f'{xdit_block_prefix}self_attn.out_proj.weight',
-                f'{block_prefix}self_attn.q.bias': f'{xdit_block_prefix}self_attn.q_proj.bias',
-                f'{block_prefix}self_attn.k.bias': f'{xdit_block_prefix}self_attn.k_proj.bias',
-                f'{block_prefix}self_attn.v.bias': f'{xdit_block_prefix}self_attn.v_proj.bias',
-                f'{block_prefix}self_attn.out.bias': f'{xdit_block_prefix}self_attn.out_proj.bias',
-            })
-            
-            # Cross attention (if exists)
-            if hasattr(self.diffusion_model.blocks[i], 'cross_attn'):
-                param_mapping.update({
-                    f'{block_prefix}cross_attn.q.weight': f'{xdit_block_prefix}cross_attn.q_proj.weight',
-                    f'{block_prefix}cross_attn.k.weight': f'{xdit_block_prefix}cross_attn.k_proj.weight',
-                    f'{block_prefix}cross_attn.v.weight': f'{xdit_block_prefix}cross_attn.v_proj.weight',
-                    f'{block_prefix}cross_attn.out.weight': f'{xdit_block_prefix}cross_attn.out_proj.weight',
-                    f'{block_prefix}cross_attn.q.bias': f'{xdit_block_prefix}cross_attn.q_proj.bias',
-                    f'{block_prefix}cross_attn.k.bias': f'{xdit_block_prefix}cross_attn.k_proj.bias',
-                    f'{block_prefix}cross_attn.v.bias': f'{xdit_block_prefix}cross_attn.v_proj.bias',
-                    f'{block_prefix}cross_attn.out.bias': f'{xdit_block_prefix}cross_attn.out_proj.bias',
-                })
-            
-            # FFN
-            param_mapping.update({
-                f'{block_prefix}ffn.0.weight': f'{xdit_block_prefix}mlp.fc1.weight',
-                f'{block_prefix}ffn.0.bias': f'{xdit_block_prefix}mlp.fc1.bias',
-                f'{block_prefix}ffn.2.weight': f'{xdit_block_prefix}mlp.fc2.weight',
-                f'{block_prefix}ffn.2.bias': f'{xdit_block_prefix}mlp.fc2.bias',
-            })
-            
-            # Layer norms
-            param_mapping.update({
-                f'{block_prefix}norm1.weight': f'{xdit_block_prefix}self_attn_layer_norm.weight',
-                f'{block_prefix}norm1.bias': f'{xdit_block_prefix}self_attn_layer_norm.bias',
-                f'{block_prefix}norm2.weight': f'{xdit_block_prefix}final_layer_norm.weight',
-                f'{block_prefix}norm2.bias': f'{xdit_block_prefix}final_layer_norm.bias',
-            })
-        
-        # Convert parameters
-        for wan_key, xdit_key in param_mapping.items():
-            if wan_key in wan_state_dict:
-                xdit_state_dict[xdit_key] = wan_state_dict[wan_key]
-        
-        # Load converted weights into xdit model
-        missing_keys, unexpected_keys = self.xdit_model.load_state_dict(xdit_state_dict, strict=False)
-        
-        if missing_keys:
-            log.warning(f"Missing keys when converting to xdit: {missing_keys}")
-        if unexpected_keys:
-            log.warning(f"Unexpected keys when converting to xdit: {unexpected_keys}")
-        
-        log.info("Successfully converted WanVideo model to xdit format")
+        return fsdp_model
 
     def forward_distributed(self, *args, **kwargs):
         """Forward pass using distributed inference"""
-        if self.usp_inference is None:
-            raise ValueError("USP inference not initialized")
-        
-        return self.usp_inference.forward(*args, **kwargs)
+        if self.fsdp_model is not None:
+            return self.fsdp_model(*args, **kwargs)
+        elif hasattr(self, 'diffusion_model'):
+            return self.diffusion_model(*args, **kwargs)
+        else:
+            raise ValueError("No model available for inference")
 
-class XDitUSPConfigNode:
-    """ComfyUI node for configuring xdit+USP settings"""
+    def cleanup(self):
+        """Cleanup distributed resources"""
+        if self.fsdp_model is not None:
+            # Free FSDP storage
+            for m in self.fsdp_model.modules():
+                if isinstance(m, FSDP):
+                    from torch.distributed.utils import _free_storage
+                    _free_storage(m._handle.flat_param.data)
+            del self.fsdp_model
+            self.fsdp_model = None
+        
+        if self.is_distributed and dist.is_initialized():
+            dist.destroy_process_group()
+            self.is_distributed = False
+        
+        gc.collect()
+        torch.cuda.empty_cache()
+
+class WanDistributedConfigNode:
+    """ComfyUI node for configuring Wan2.1 distributed settings"""
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "num_gpus": ("INT", {"default": 2, "min": 1, "max": 8, "step": 1, "tooltip": "Number of GPUs to use for distributed inference"}),
-                "gpu_memory_fraction": ("FLOAT", {"default": 0.9, "min": 0.1, "max": 1.0, "step": 0.05, "tooltip": "Fraction of GPU memory to use per GPU"}),
-                "pipeline_parallel_size": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1, "tooltip": "Pipeline parallel size"}),
-                "tensor_parallel_size": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1, "tooltip": "Tensor parallel size"}),
-                "data_parallel_size": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1, "tooltip": "Data parallel size"}),
-                "use_fp16": ("BOOLEAN", {"default": True, "tooltip": "Use FP16 precision for distributed inference"}),
-                "use_bf16": ("BOOLEAN", {"default": False, "tooltip": "Use BF16 precision for distributed inference"}),
-                "enable_activation_checkpointing": ("BOOLEAN", {"default": True, "tooltip": "Enable activation checkpointing to save memory"}),
-                "enable_gradient_checkpointing": ("BOOLEAN", {"default": False, "tooltip": "Enable gradient checkpointing"}),
-                "max_batch_size": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1, "tooltip": "Maximum batch size for distributed inference"}),
-                "max_sequence_length": ("INT", {"default": 2048, "min": 512, "max": 8192, "step": 512, "tooltip": "Maximum sequence length"}),
-                "overlap_p2p_comm": ("BOOLEAN", {"default": True, "tooltip": "Overlap peer-to-peer communication with computation"}),
-                "use_flash_attention": ("BOOLEAN", {"default": True, "tooltip": "Use Flash Attention for faster attention computation"}),
-                "use_sdpa": ("BOOLEAN", {"default": True, "tooltip": "Use SDPA (Scaled Dot-Product Attention) for attention computation"}),
+                "world_size": ("INT", {"default": 2, "min": 1, "max": 8, "step": 1, "tooltip": "Number of processes/GPUs"}),
+                "rank": ("INT", {"default": 0, "min": 0, "max": 7, "step": 1, "tooltip": "Process rank (0 to world_size-1)"}),
+                "backend": (["nccl", "gloo"], {"default": "nccl", "tooltip": "Distributed backend"}),
+                "use_fsdp": ("BOOLEAN", {"default": True, "tooltip": "Use FSDP for model sharding"}),
+                "use_context_parallel": ("BOOLEAN", {"default": False, "tooltip": "Use context parallel (requires xfuser)"}),
+                "ulysses_size": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1, "tooltip": "Ulysses size for context parallel"}),
+                "ring_size": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1, "tooltip": "Ring size for context parallel"}),
+                "t5_fsdp": ("BOOLEAN", {"default": False, "tooltip": "Use FSDP for T5 text encoder"}),
+                "dit_fsdp": ("BOOLEAN", {"default": False, "tooltip": "Use FSDP for DIT model"}),
+                "use_usp": ("BOOLEAN", {"default": False, "tooltip": "Use USP (Ultra-Scalable Parallelism)"}),
+                "t5_cpu": ("BOOLEAN", {"default": False, "tooltip": "Load T5 on CPU"}),
+            },
+            "optional": {
+                "param_dtype": (["bfloat16", "float16", "float32"], {"default": "bfloat16", "tooltip": "Parameter dtype for FSDP"}),
+                "reduce_dtype": (["float32", "bfloat16", "float16"], {"default": "float32", "tooltip": "Reduce dtype for FSDP"}),
+                "buffer_dtype": (["float32", "bfloat16", "float16"], {"default": "float32", "tooltip": "Buffer dtype for FSDP"}),
+                "sharding_strategy": (["FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD"], {"default": "FULL_SHARD", "tooltip": "FSDP sharding strategy"}),
+                "sync_module_states": ("BOOLEAN", {"default": True, "tooltip": "Sync module states in FSDP"}),
             }
         }
 
-    RETURN_TYPES = ("XDITUSPCONFIG",)
-    RETURN_NAMES = ("xdit_usp_config",)
+    RETURN_TYPES = ("WANDISTRIBUTEDCONFIG",)
+    RETURN_NAMES = ("wan_distributed_config",)
     FUNCTION = "create_config"
-    CATEGORY = "WanVideoWrapper/XDitUSP"
-    DESCRIPTION = "Configure xdit+USP distributed inference settings"
+    CATEGORY = "WanVideoWrapper/Distributed"
+    DESCRIPTION = "Configure Wan2.1 distributed inference settings"
 
     def create_config(self, **kwargs):
-        config = XDitUSPConfig(**kwargs)
+        # Convert string dtypes to torch dtypes
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32
+        }
+        
+        if "param_dtype" in kwargs:
+            kwargs["param_dtype"] = dtype_map[kwargs["param_dtype"]]
+        if "reduce_dtype" in kwargs:
+            kwargs["reduce_dtype"] = dtype_map[kwargs["reduce_dtype"]]
+        if "buffer_dtype" in kwargs:
+            kwargs["buffer_dtype"] = dtype_map[kwargs["buffer_dtype"]]
+        
+        # Convert sharding strategy string to enum
+        if "sharding_strategy" in kwargs:
+            strategy_map = {
+                "FULL_SHARD": ShardingStrategy.FULL_SHARD,
+                "SHARD_GRAD_OP": ShardingStrategy.SHARD_GRAD_OP,
+                "NO_SHARD": ShardingStrategy.NO_SHARD
+            }
+            kwargs["sharding_strategy"] = strategy_map[kwargs["sharding_strategy"]]
+        
+        config = WanDistributedConfig(**kwargs)
         return (config,)
 
-class XDitUSPWanVideoModelLoader:
-    """ComfyUI node for loading WanVideo models with xdit+USP distributed inference"""
+class WanDistributedModelLoader:
+    """ComfyUI node for loading WanVideo models with Wan2.1 distributed inference"""
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
                 "model": (folder_paths.get_filename_list("diffusion_models"), {"tooltip": "WanVideo model to load"}),
                 "base_precision": (["fp32", "bf16", "fp16"], {"default": "bf16"}),
-                "xdit_usp_config": ("XDITUSPCONFIG", {"tooltip": "xdit+USP configuration"}),
+                "wan_distributed_config": ("WANDISTRIBUTEDCONFIG", {"tooltip": "Wan2.1 distributed configuration"}),
             },
             "optional": {
                 "attention_mode": ([
@@ -279,24 +288,22 @@ class XDitUSPWanVideoModelLoader:
             }
         }
 
-    RETURN_TYPES = ("XDITUSPWANVIDEOMODEL",)
+    RETURN_TYPES = ("WANDISTRIBUTEDMODEL",)
     RETURN_NAMES = ("model",)
     FUNCTION = "loadmodel"
-    CATEGORY = "WanVideoWrapper/XDitUSP"
-    DESCRIPTION = "Load WanVideo model with xdit+USP distributed inference support"
+    CATEGORY = "WanVideoWrapper/Distributed"
+    DESCRIPTION = "Load WanVideo model with Wan2.1 distributed inference support"
 
-    def loadmodel(self, model, base_precision, xdit_usp_config, attention_mode="sdpa", lora=None, vace_model=None):
-        if not XDIT_AVAILABLE:
-            raise ImportError("xdit is required for distributed inference. Please install xdit.")
-        if not USP_AVAILABLE:
-            raise ImportError("usp is required for distributed inference. Please install usp.")
+    def loadmodel(self, model, base_precision, wan_distributed_config, attention_mode="sdpa", lora=None, vace_model=None):
+        if not FSDP_AVAILABLE:
+            raise ImportError("FSDP is required for distributed inference. Please install PyTorch with distributed support.")
         
         # Check if we have enough GPUs
         available_gpus = torch.cuda.device_count()
-        if available_gpus < xdit_usp_config.num_gpus:
-            raise ValueError(f"Requested {xdit_usp_config.num_gpus} GPUs but only {available_gpus} are available")
+        if available_gpus < wan_distributed_config.world_size:
+            raise ValueError(f"Requested {wan_distributed_config.world_size} GPUs but only {available_gpus} are available")
         
-        log.info(f"Loading WanVideo model with xdit+USP distributed inference on {xdit_usp_config.num_gpus} GPUs")
+        log.info(f"Loading WanVideo model with Wan2.1 distributed inference on {wan_distributed_config.world_size} GPUs")
         
         # Unload existing models
         mm.unload_all_models()
@@ -406,7 +413,7 @@ class XDitUSPWanVideoModelLoader:
         transformer.eval()
         
         # Create ComfyUI model wrapper
-        comfy_model = XDitUSPWanVideoModel(
+        comfy_model = WanDistributedModel(
             comfy.model_base.ModelConfig(base_dtype),
             model_type=comfy.model_base.ModelType.FLOW,
             device=device,
@@ -428,10 +435,7 @@ class XDitUSPWanVideoModelLoader:
             pbar.update(1)
         
         # Setup distributed inference
-        comfy_model.setup_distributed_inference(xdit_usp_config)
-        
-        # Convert to xdit format
-        comfy_model.convert_wan_to_xdit()
+        comfy_model.setup_distributed_inference(wan_distributed_config)
         
         # Handle LoRA if provided
         if lora is not None:
@@ -451,23 +455,24 @@ class XDitUSPWanVideoModelLoader:
         patcher.model["auto_cpu_offload"] = False
         patcher.model["control_lora"] = False
         patcher.model["distributed_inference"] = True
+        patcher.model["distributed_config"] = wan_distributed_config
         
         # Clean up
         del sd
         gc.collect()
         mm.soft_empty_cache()
         
-        log.info("Successfully loaded WanVideo model with xdit+USP distributed inference")
+        log.info("Successfully loaded WanVideo model with Wan2.1 distributed inference")
         
         return (patcher,)
 
 # Register the new nodes
 NODE_CLASS_MAPPINGS = {
-    "XDitUSPConfig": XDitUSPConfigNode,
-    "XDitUSPWanVideoModelLoader": XDitUSPWanVideoModelLoader,
+    "WanDistributedConfig": WanDistributedConfigNode,
+    "WanDistributedModelLoader": WanDistributedModelLoader,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "XDitUSPConfig": "XDit+USP Config",
-    "XDitUSPWanVideoModelLoader": "XDit+USP WanVideo Model Loader",
+    "WanDistributedConfig": "Wan2.1 Distributed Config",
+    "WanDistributedModelLoader": "Wan2.1 Distributed Model Loader",
 } 

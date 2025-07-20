@@ -7,8 +7,6 @@ sentencepiece>=0.2.0
 protobuf
 pyloudnorm
 gguf>=0.14.0
-# XDit+USP dependencies for distributed inference
-xdit>=0.1.0
-usp>=0.1.0
+# Wan2.1 distributed inference dependencies
 torch>=2.0.0
-transformers>=4.30.0
+xfuser>=0.1.0
