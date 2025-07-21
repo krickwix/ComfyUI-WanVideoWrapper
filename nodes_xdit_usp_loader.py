@@ -449,11 +449,18 @@ class WanDistributedModel(WanVideoModel):
             frames_per_gpu = max(1, num_frames // len(self.gpu_devices))
             log.info(f"📹 Processing {num_frames} video frames across {len(self.gpu_devices)} GPUs ({frames_per_gpu} frames per GPU)")
             
+            # If we have fewer frames than GPUs, use fewer GPUs
+            if num_frames < len(self.gpu_devices):
+                log.info(f"⚠️  Fewer frames ({num_frames}) than GPUs ({len(self.gpu_devices)}), using only first {num_frames} GPUs")
+                active_gpus = self.gpu_devices[:num_frames]
+            else:
+                active_gpus = self.gpu_devices
+            
             # Process frames in parallel across GPUs
             outputs = []
-            for i, gpu_idx in enumerate(self.gpu_devices):
+            for i, gpu_idx in enumerate(active_gpus):
                 start_idx = i * frames_per_gpu
-                end_idx = start_idx + frames_per_gpu if i < len(self.gpu_devices) - 1 else num_frames
+                end_idx = start_idx + frames_per_gpu if i < len(active_gpus) - 1 else num_frames
                 
                 if start_idx >= num_frames:
                     break
@@ -466,14 +473,15 @@ class WanDistributedModel(WanVideoModel):
                 gpu_frames = [frame.to(device) if torch.is_tensor(frame) else frame for frame in gpu_frames]
                 
                 # Process on this GPU
-                with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                    # Create args for this GPU - avoid duplicate 'x' argument
-                    gpu_kwargs = kwargs.copy()
-                    gpu_kwargs['x'] = gpu_frames
-                    
-                    # Run forward pass on this GPU
-                    gpu_output = original_forward(**gpu_kwargs)
-                    outputs.append(gpu_output)
+                with torch.cuda.device(device):
+                    with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                        # Create args for this GPU - avoid duplicate 'x' argument
+                        gpu_kwargs = kwargs.copy()
+                        gpu_kwargs['x'] = gpu_frames
+                        
+                        # Run forward pass on this GPU
+                        gpu_output = original_forward(**gpu_kwargs)
+                        outputs.append(gpu_output)
             
             # Combine outputs
             if outputs:
@@ -529,12 +537,13 @@ class WanDistributedModel(WanVideoModel):
                     x_chunk = x[:, start_idx:end_idx].to(device)
                     
                     # Process on this GPU
-                    with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                        gpu_kwargs = kwargs.copy()
-                        gpu_kwargs['x'] = x_chunk
-                        
-                        gpu_output = original_forward(**gpu_kwargs)
-                        outputs.append(gpu_output)
+                    with torch.cuda.device(device):
+                        with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                            gpu_kwargs = kwargs.copy()
+                            gpu_kwargs['x'] = x_chunk
+                            
+                            gpu_output = original_forward(**gpu_kwargs)
+                            outputs.append(gpu_output)
                 
                 # Combine outputs
                 if outputs:
@@ -572,12 +581,13 @@ class WanDistributedModel(WanVideoModel):
                     x_batch = x[start_idx:end_idx].to(device)
                     
                     # Process on this GPU
-                    with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                        gpu_kwargs = kwargs.copy()
-                        gpu_kwargs['x'] = x_batch
-                        
-                        gpu_output = original_forward(**gpu_kwargs)
-                        outputs.append(gpu_output)
+                    with torch.cuda.device(device):
+                        with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                            gpu_kwargs = kwargs.copy()
+                            gpu_kwargs['x'] = x_batch
+                            
+                            gpu_output = original_forward(**gpu_kwargs)
+                            outputs.append(gpu_output)
                 
                 # Combine outputs
                 if outputs:
