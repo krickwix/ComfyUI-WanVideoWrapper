@@ -394,23 +394,8 @@ class WanDistributedModel(WanVideoModel):
             # Override the model's forward method to ensure multi-GPU utilization
             original_forward = model.forward
             def multi_gpu_forward(*args, **kwargs):
-                # Handle input properly - x can be a list of tensors for video processing
-                x = args[0] if len(args) > 0 else kwargs.get('x')
-                if x is not None:
-                    if isinstance(x, list):
-                        # If x is a list of tensors, move each tensor to the correct device
-                        x = [tensor.to(f"cuda:{self.gpu_devices[0]}") if torch.is_tensor(tensor) else tensor for tensor in x]
-                    elif torch.is_tensor(x):
-                        # If x is a single tensor, move it to the correct device
-                        x = x.to(f"cuda:{self.gpu_devices[0]}")
-                    
-                    if len(args) > 0:
-                        args = list(args)
-                        args[0] = x
-                    if 'x' in kwargs:
-                        kwargs['x'] = x
-                
-                # Implement true parallel processing across GPUs
+                # Pass through to parallel processing without moving to single GPU first
+                # Let the parallel processing handle device placement
                 return self._parallel_forward_multi_gpu(original_forward, *args, **kwargs)
             
             model.forward = multi_gpu_forward
@@ -442,14 +427,18 @@ class WanDistributedModel(WanVideoModel):
     
     def _parallel_forward_multi_gpu(self, original_forward, *args, **kwargs):
         """True parallel forward pass using multiple GPUs simultaneously"""
+        log.info(f"🚀 Starting parallel forward with {len(self.gpu_devices)} GPUs")
+        
         if not hasattr(self, 'gpu_devices') or len(self.gpu_devices) < 2:
             # Fallback to single GPU if not enough GPUs
+            log.info("⚠️  Not enough GPUs, falling back to single GPU")
             with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
                 return original_forward(*args, **kwargs)
         
         # Extract input tensors
         x = args[0] if len(args) > 0 else kwargs.get('x')
         if x is None:
+            log.info("⚠️  No input tensor found, falling back to single GPU")
             with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
                 return original_forward(*args, **kwargs)
         
@@ -458,6 +447,7 @@ class WanDistributedModel(WanVideoModel):
             # For list of tensors (video frames), split across GPUs
             num_frames = len(x)
             frames_per_gpu = max(1, num_frames // len(self.gpu_devices))
+            log.info(f"📹 Processing {num_frames} video frames across {len(self.gpu_devices)} GPUs ({frames_per_gpu} frames per GPU)")
             
             # Process frames in parallel across GPUs
             outputs = []
@@ -519,10 +509,12 @@ class WanDistributedModel(WanVideoModel):
         elif torch.is_tensor(x):
             # For single tensor, split batch dimension across GPUs
             batch_size = x.shape[0]
+            log.info(f"🔢 Processing tensor with shape {x.shape}")
             if batch_size == 1:
                 # Single batch - split sequence length across GPUs
                 seq_len = x.shape[1]
                 chunks_per_gpu = max(1, seq_len // len(self.gpu_devices))
+                log.info(f"📏 Splitting sequence length {seq_len} across {len(self.gpu_devices)} GPUs ({chunks_per_gpu} chunks per GPU)")
                 
                 outputs = []
                 for i, gpu_idx in enumerate(self.gpu_devices):
@@ -565,6 +557,7 @@ class WanDistributedModel(WanVideoModel):
             else:
                 # Multiple batches - split batch dimension
                 batches_per_gpu = max(1, batch_size // len(self.gpu_devices))
+                log.info(f"📦 Splitting batch size {batch_size} across {len(self.gpu_devices)} GPUs ({batches_per_gpu} batches per GPU)")
                 
                 outputs = []
                 for i, gpu_idx in enumerate(self.gpu_devices):
