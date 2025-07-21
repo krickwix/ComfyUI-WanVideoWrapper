@@ -487,7 +487,24 @@ class WanDistributedModel(WanVideoModel):
             
             # Combine outputs
             if outputs:
-                if isinstance(outputs[0], list):
+                if isinstance(outputs[0], tuple):
+                    # If output is a tuple (noise_pred, cache_state), handle separately
+                    noise_preds = [output[0] for output in outputs]
+                    cache_states = [output[1] for output in outputs]
+                    
+                    # Combine noise predictions
+                    if isinstance(noise_preds[0], list):
+                        combined_noise_pred = []
+                        for noise_pred_list in noise_preds:
+                            combined_noise_pred.extend(noise_pred_list)
+                    else:
+                        combined_noise_pred = torch.cat(noise_preds, dim=0)
+                    
+                    # Combine cache states (usually just use the last one or merge appropriately)
+                    combined_cache_state = cache_states[-1]  # Use last cache state
+                    
+                    return (combined_noise_pred, combined_cache_state)
+                elif isinstance(outputs[0], list):
                     # If output is also a list, concatenate
                     combined_output = []
                     for output_list in outputs:
@@ -529,7 +546,20 @@ class WanDistributedModel(WanVideoModel):
                 
                 # Combine outputs
                 if outputs:
-                    return torch.cat(outputs, dim=1)
+                    if isinstance(outputs[0], tuple):
+                        # If output is a tuple (noise_pred, cache_state), handle separately
+                        noise_preds = [output[0] for output in outputs]
+                        cache_states = [output[1] for output in outputs]
+                        
+                        # Combine noise predictions along sequence dimension
+                        combined_noise_pred = torch.cat(noise_preds, dim=1)
+                        
+                        # Combine cache states (usually just use the last one or merge appropriately)
+                        combined_cache_state = cache_states[-1]  # Use last cache state
+                        
+                        return (combined_noise_pred, combined_cache_state)
+                    else:
+                        return torch.cat(outputs, dim=1)
                 else:
                     return original_forward(*args, **kwargs)
             else:
@@ -558,7 +588,20 @@ class WanDistributedModel(WanVideoModel):
                 
                 # Combine outputs
                 if outputs:
-                    return torch.cat(outputs, dim=0)
+                    if isinstance(outputs[0], tuple):
+                        # If output is a tuple (noise_pred, cache_state), handle separately
+                        noise_preds = [output[0] for output in outputs]
+                        cache_states = [output[1] for output in outputs]
+                        
+                        # Combine noise predictions along batch dimension
+                        combined_noise_pred = torch.cat(noise_preds, dim=0)
+                        
+                        # Combine cache states (usually just use the last one or merge appropriately)
+                        combined_cache_state = cache_states[-1]  # Use last cache state
+                        
+                        return (combined_noise_pred, combined_cache_state)
+                    else:
+                        return torch.cat(outputs, dim=0)
                 else:
                     return original_forward(*args, **kwargs)
         else:
