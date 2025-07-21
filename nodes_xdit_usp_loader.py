@@ -410,10 +410,8 @@ class WanDistributedModel(WanVideoModel):
                     if 'x' in kwargs:
                         kwargs['x'] = x
                 
-                # Use the original forward method with device-sharded model
-                # The model components are already distributed across GPUs
-                with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                    return original_forward(*args, **kwargs)
+                # Implement true parallel processing across GPUs
+                return self._parallel_forward_multi_gpu(original_forward, *args, **kwargs)
             
             model.forward = multi_gpu_forward
             log.info("✅ Model forward method overridden for multi-GPU utilization")
@@ -442,34 +440,137 @@ class WanDistributedModel(WanVideoModel):
         else:
             raise ValueError("No model available for inference")
     
-    def _forward_multi_gpu(self, *args, **kwargs):
-        """Multi-GPU parallel forward pass for single-server mode"""
-        if not hasattr(self, 'diffusion_model') or not hasattr(self, 'gpu_devices'):
-            return self.diffusion_model(*args, **kwargs)
+    def _parallel_forward_multi_gpu(self, original_forward, *args, **kwargs):
+        """True parallel forward pass using multiple GPUs simultaneously"""
+        if not hasattr(self, 'gpu_devices') or len(self.gpu_devices) < 2:
+            # Fallback to single GPU if not enough GPUs
+            with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                return original_forward(*args, **kwargs)
         
-        model = self.diffusion_model
-        
-        # Ensure input is on the correct device
+        # Extract input tensors
         x = args[0] if len(args) > 0 else kwargs.get('x')
-        if x is not None:
-            if isinstance(x, list):
-                # If x is a list of tensors, move each tensor to the correct device
-                x = [tensor.to(f"cuda:{self.gpu_devices[0]}") if torch.is_tensor(tensor) else tensor for tensor in x]
-            elif torch.is_tensor(x):
-                # If x is a single tensor, move it to the correct device
-                x = x.to(f"cuda:{self.gpu_devices[0]}")
+        if x is None:
+            with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                return original_forward(*args, **kwargs)
+        
+        # Handle different input types
+        if isinstance(x, list):
+            # For list of tensors (video frames), split across GPUs
+            num_frames = len(x)
+            frames_per_gpu = max(1, num_frames // len(self.gpu_devices))
             
-            if len(args) > 0:
-                args = list(args)
-                args[0] = x
-            if 'x' in kwargs:
-                kwargs['x'] = x
+            # Process frames in parallel across GPUs
+            outputs = []
+            for i, gpu_idx in enumerate(self.gpu_devices):
+                start_idx = i * frames_per_gpu
+                end_idx = start_idx + frames_per_gpu if i < len(self.gpu_devices) - 1 else num_frames
+                
+                if start_idx >= num_frames:
+                    break
+                
+                # Get frames for this GPU
+                gpu_frames = x[start_idx:end_idx]
+                
+                # Move frames to this GPU
+                device = f"cuda:{gpu_idx}"
+                gpu_frames = [frame.to(device) if torch.is_tensor(frame) else frame for frame in gpu_frames]
+                
+                # Process on this GPU
+                with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                    # Create args for this GPU
+                    gpu_args = list(args)
+                    gpu_args[0] = gpu_frames
+                    gpu_kwargs = kwargs.copy()
+                    gpu_kwargs['x'] = gpu_frames
+                    
+                    # Run forward pass on this GPU
+                    gpu_output = original_forward(*gpu_args, **gpu_kwargs)
+                    outputs.append(gpu_output)
+            
+            # Combine outputs
+            if outputs:
+                if isinstance(outputs[0], list):
+                    # If output is also a list, concatenate
+                    combined_output = []
+                    for output_list in outputs:
+                        combined_output.extend(output_list)
+                    return combined_output
+                else:
+                    # If output is a tensor, concatenate
+                    return torch.cat(outputs, dim=0)
+            else:
+                return original_forward(*args, **kwargs)
         
-        # Run inference using the device-sharded model
-        with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-            output = model(*args, **kwargs)
-        
-        return output
+        elif torch.is_tensor(x):
+            # For single tensor, split batch dimension across GPUs
+            batch_size = x.shape[0]
+            if batch_size == 1:
+                # Single batch - split sequence length across GPUs
+                seq_len = x.shape[1]
+                chunks_per_gpu = max(1, seq_len // len(self.gpu_devices))
+                
+                outputs = []
+                for i, gpu_idx in enumerate(self.gpu_devices):
+                    start_idx = i * chunks_per_gpu
+                    end_idx = start_idx + chunks_per_gpu if i < len(self.gpu_devices) - 1 else seq_len
+                    
+                    if start_idx >= seq_len:
+                        break
+                    
+                    # Get chunk for this GPU
+                    device = f"cuda:{gpu_idx}"
+                    x_chunk = x[:, start_idx:end_idx].to(device)
+                    
+                    # Process on this GPU
+                    with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                        gpu_args = list(args)
+                        gpu_args[0] = x_chunk
+                        gpu_kwargs = kwargs.copy()
+                        gpu_kwargs['x'] = x_chunk
+                        
+                        gpu_output = original_forward(*gpu_args, **gpu_kwargs)
+                        outputs.append(gpu_output)
+                
+                # Combine outputs
+                if outputs:
+                    return torch.cat(outputs, dim=1)
+                else:
+                    return original_forward(*args, **kwargs)
+            else:
+                # Multiple batches - split batch dimension
+                batches_per_gpu = max(1, batch_size // len(self.gpu_devices))
+                
+                outputs = []
+                for i, gpu_idx in enumerate(self.gpu_devices):
+                    start_idx = i * batches_per_gpu
+                    end_idx = start_idx + batches_per_gpu if i < len(self.gpu_devices) - 1 else batch_size
+                    
+                    if start_idx >= batch_size:
+                        break
+                    
+                    # Get batch for this GPU
+                    device = f"cuda:{gpu_idx}"
+                    x_batch = x[start_idx:end_idx].to(device)
+                    
+                    # Process on this GPU
+                    with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                        gpu_args = list(args)
+                        gpu_args[0] = x_batch
+                        gpu_kwargs = kwargs.copy()
+                        gpu_kwargs['x'] = x_batch
+                        
+                        gpu_output = original_forward(*gpu_args, **gpu_kwargs)
+                        outputs.append(gpu_output)
+                
+                # Combine outputs
+                if outputs:
+                    return torch.cat(outputs, dim=0)
+                else:
+                    return original_forward(*args, **kwargs)
+        else:
+            # Fallback for other input types
+            with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                return original_forward(*args, **kwargs)
 
     def cleanup(self):
         """Cleanup distributed resources"""
