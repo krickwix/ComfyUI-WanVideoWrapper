@@ -449,9 +449,14 @@ class WanDistributedModel(WanVideoModel):
             frames_per_gpu = max(1, num_frames // len(self.gpu_devices))
             log.info(f"📹 Processing {num_frames} video frames across {len(self.gpu_devices)} GPUs ({frames_per_gpu} frames per GPU)")
             
-            # If we have fewer frames than GPUs, use fewer GPUs
-            if num_frames < len(self.gpu_devices):
-                log.info(f"⚠️  Fewer frames ({num_frames}) than GPUs ({len(self.gpu_devices)}), using only first {num_frames} GPUs")
+            # For single frame, split the tensor across GPUs instead of using just one GPU
+            if num_frames == 1 and len(self.gpu_devices) > 1:
+                log.info(f"INFO: Single frame detected, splitting tensor across {len(self.gpu_devices)} GPUs for parallel processing")
+                # Convert single frame to tensor and split across GPUs
+                single_frame = x[0] if torch.is_tensor(x[0]) else torch.tensor(x[0])
+                return self._split_tensor_across_gpus(original_forward, single_frame, kwargs)
+            elif num_frames < len(self.gpu_devices):
+                log.info(f"INFO: Fewer frames ({num_frames}) than GPUs ({len(self.gpu_devices)}), using only first {num_frames} GPUs")
                 active_gpus = self.gpu_devices[:num_frames]
             else:
                 active_gpus = self.gpu_devices
@@ -611,6 +616,71 @@ class WanDistributedModel(WanVideoModel):
             # Fallback for other input types
             with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
                 return original_forward(*args, **kwargs)
+
+    def _split_tensor_across_gpus(self, original_forward, tensor, kwargs):
+        """Split a single tensor across multiple GPUs for parallel processing"""
+        log.info(f"INFO: Splitting tensor with shape {tensor.shape} across {len(self.gpu_devices)} GPUs")
+        
+        # Determine the best dimension to split
+        if len(tensor.shape) >= 2:
+            # Split along the second dimension (sequence length or features)
+            split_dim = 1
+            total_size = tensor.shape[split_dim]
+        else:
+            # Split along the first dimension
+            split_dim = 0
+            total_size = tensor.shape[split_dim]
+        
+        chunks_per_gpu = max(1, total_size // len(self.gpu_devices))
+        log.info(f"INFO: Splitting dimension {split_dim} (size {total_size}) into {chunks_per_gpu} chunks per GPU")
+        
+        outputs = []
+        for i, gpu_idx in enumerate(self.gpu_devices):
+            start_idx = i * chunks_per_gpu
+            end_idx = start_idx + chunks_per_gpu if i < len(self.gpu_devices) - 1 else total_size
+            
+            if start_idx >= total_size:
+                break
+            
+            # Get chunk for this GPU
+            device = f"cuda:{gpu_idx}"
+            if split_dim == 0:
+                tensor_chunk = tensor[start_idx:end_idx].to(device)
+            else:
+                tensor_chunk = tensor[:, start_idx:end_idx].to(device)
+            
+            # Process on this GPU
+            with torch.cuda.device(device):
+                with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+                    gpu_kwargs = kwargs.copy()
+                    gpu_kwargs['x'] = [tensor_chunk]  # Wrap in list to maintain format
+                    
+                    gpu_output = original_forward(**gpu_kwargs)
+                    outputs.append(gpu_output)
+        
+        # Combine outputs
+        if outputs:
+            if isinstance(outputs[0], tuple):
+                # If output is a tuple (noise_pred, cache_state), handle separately
+                noise_preds = [output[0] for output in outputs]
+                cache_states = [output[1] for output in outputs]
+                
+                # Combine noise predictions along the split dimension
+                if isinstance(noise_preds[0], list):
+                    combined_noise_pred = []
+                    for noise_pred_list in noise_preds:
+                        combined_noise_pred.extend(noise_pred_list)
+                else:
+                    combined_noise_pred = torch.cat(noise_preds, dim=split_dim)
+                
+                # Combine cache states (usually just use the last one)
+                combined_cache_state = cache_states[-1]
+                
+                return (combined_noise_pred, combined_cache_state)
+            else:
+                return torch.cat(outputs, dim=split_dim)
+        else:
+            return original_forward(**kwargs)
 
     def cleanup(self):
         """Cleanup distributed resources"""
