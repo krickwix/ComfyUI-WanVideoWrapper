@@ -2075,8 +2075,8 @@ class WanVideoSampler:
                 # Generate new random noise
                 z_rand = torch.randn(z_T.shape, dtype=torch.float32, generator=seed_g, device=torch.device("cpu"))
 
-                # Apply frequency mixing
-                current_latent = freq_mix_3d(z_T.to(torch.float32), z_rand.to(device), LPF=freq_filter)
+                # Apply frequency mixing - use model's dtype instead of forcing float32
+                current_latent = freq_mix_3d(z_T.to(dtype), z_rand.to(device), LPF=freq_filter)
                 current_latent = current_latent.to(dtype)
 
             # Store initial noise for first iteration
@@ -2257,8 +2257,9 @@ class WanVideoSampler:
                             timestep, idx, image_cond, clip_fea, control_latents,
                             cache_state=self.cache_state)
                     v_delta = vt_tgt - vt_src
-                    x_tgt = x_tgt.to(torch.float32)
-                    v_delta = v_delta.to(torch.float32)
+                    # Use model's dtype instead of forcing float32
+                    x_tgt = x_tgt.to(dtype)
+                    v_delta = v_delta.to(dtype)
                     x_tgt = x_tgt + (sigma_prev - sigma) * v_delta
                     x0 = x_tgt
                 #region context windowing
@@ -2552,7 +2553,7 @@ class WanVideoSampler:
                                 cm_result = cm.transfer(src=img, ref=original_image[0].permute(1, 2, 3, 0).squeeze(0).cpu().numpy(), method=colormatch)
                                 cm_result_list.append(torch.from_numpy(cm_result))
                     
-                            videos = torch.stack(cm_result_list, dim=0).to(torch.float32).permute(3, 0, 1, 2).unsqueeze(0)
+                            videos = torch.stack(cm_result_list, dim=0).to(dtype).permute(3, 0, 1, 2).unsqueeze(0)
 
                         if is_first_clip:
                             gen_video_list.append(videos)
@@ -2569,7 +2570,7 @@ class WanVideoSampler:
                         is_first_clip = False
                         cur_motion_frames_num = motion_frame
 
-                        cond_image = videos[:, :, -cur_motion_frames_num:].to(torch.float32).to(device)
+                        cond_image = videos[:, :, -cur_motion_frames_num:].to(dtype).to(device)
 
                         # Update progress bar
                         iteration_count += 1
@@ -2594,7 +2595,7 @@ class WanVideoSampler:
                                     else:
                                         miss_lengths.append(0)
                     
-                    gen_video_samples = torch.cat(gen_video_list, dim=2).to(torch.float32)
+                    gen_video_samples = torch.cat(gen_video_list, dim=2).to(dtype)
                     
                     del noise, latent
                     if force_offload:

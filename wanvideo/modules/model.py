@@ -1418,14 +1418,18 @@ class WanModel(ModelMixin, ConfigMixin):
         # embeddings
         if control_lora_enabled:
             self.expanded_patch_embedding.to(device)
+            # Use model's dtype instead of forcing float32
+            model_dtype = next(self.expanded_patch_embedding.parameters()).dtype
             x = [
-            self.expanded_patch_embedding(u.unsqueeze(0).to(torch.float32)).to(x[0].dtype)
+            self.expanded_patch_embedding(u.unsqueeze(0).to(model_dtype)).to(x[0].dtype)
             for u in x
             ]
         else:
             self.original_patch_embedding.to(self.main_device)
+            # Use model's dtype instead of forcing float32
+            model_dtype = next(self.original_patch_embedding.parameters()).dtype
             x = [
-            self.original_patch_embedding(u.unsqueeze(0).to(torch.float32)).to(x[0].dtype)
+            self.original_patch_embedding(u.unsqueeze(0).to(model_dtype)).to(x[0].dtype)
             for u in x
             ]
 
@@ -1604,7 +1608,8 @@ class WanModel(ModelMixin, ConfigMixin):
         # convert ref_target_masks to token_ref_target_masks
         token_ref_target_masks = None
         if ref_target_masks is not None:
-            ref_target_masks = ref_target_masks.unsqueeze(0).to(torch.float32) 
+            # Use x's dtype instead of forcing float32
+            ref_target_masks = ref_target_masks.unsqueeze(0).to(x.dtype) 
             token_ref_target_masks = nn.functional.interpolate(ref_target_masks, size=(H // 2, W // 2), mode='nearest') 
             token_ref_target_masks = token_ref_target_masks.squeeze(0)
             token_ref_target_masks = (token_ref_target_masks > 0)
