@@ -449,11 +449,11 @@ class WanDistributedModel(WanVideoModel):
             frames_per_gpu = max(1, num_frames // len(self.gpu_devices))
             log.info(f"📹 Processing {num_frames} video frames across {len(self.gpu_devices)} GPUs ({frames_per_gpu} frames per GPU)")
             
-            # For single frame, use DataParallel approach instead of tensor splitting
+            # For single frame, use the device-sharded model directly
             if num_frames == 1 and len(self.gpu_devices) > 1:
-                log.info(f"INFO: Single frame detected, using DataParallel across {len(self.gpu_devices)} GPUs")
-                # Use DataParallel for single frame to avoid tensor dimension issues
-                return self._data_parallel_forward(original_forward, x, kwargs)
+                log.info(f"INFO: Single frame detected, using device-sharded model across {len(self.gpu_devices)} GPUs")
+                # Use the device-sharded model directly for single frame
+                return self._single_frame_multi_gpu(original_forward, x, kwargs)
             elif num_frames < len(self.gpu_devices):
                 log.info(f"INFO: Fewer frames ({num_frames}) than GPUs ({len(self.gpu_devices)}), using only first {num_frames} GPUs")
                 active_gpus = self.gpu_devices[:num_frames]
@@ -616,45 +616,25 @@ class WanDistributedModel(WanVideoModel):
             with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
                 return original_forward(*args, **kwargs)
 
-    def _data_parallel_forward(self, original_forward, x, kwargs):
-        """Use DataParallel approach for single frame to utilize multiple GPUs"""
-        log.info(f"INFO: Using DataParallel for single frame processing")
+    def _single_frame_multi_gpu(self, original_forward, x, kwargs):
+        """Use device-sharded model for single frame multi-GPU processing"""
+        log.info(f"INFO: Using device-sharded model for single frame processing")
         
-        # Create a temporary model wrapper for DataParallel
-        class ModelWrapper(torch.nn.Module):
-            def __init__(self, forward_func):
-                super().__init__()
-                self.forward_func = forward_func
-            
-            def forward(self, x, **kwargs):
-                return self.forward_func(x, **kwargs)
-        
-        # Wrap the forward function
-        model_wrapper = ModelWrapper(original_forward)
-        
-        # Move to first GPU and apply DataParallel
+        # Move input to the first GPU (the model components are already distributed)
         device = f"cuda:{self.gpu_devices[0]}"
-        model_wrapper = model_wrapper.to(device)
+        if isinstance(x, list):
+            x = [tensor.to(device) if torch.is_tensor(tensor) else tensor for tensor in x]
+        elif torch.is_tensor(x):
+            x = x.to(device)
         
-        # Use DataParallel to distribute across all GPUs
-        dp_model = torch.nn.DataParallel(model_wrapper, device_ids=self.gpu_devices)
+        # Update kwargs with moved input
+        gpu_kwargs = kwargs.copy()
+        gpu_kwargs['x'] = x
         
-        # Process the input
+        # Use the original forward method with device-sharded model
+        # The model components are already distributed across GPUs
         with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-            # Move input to the first GPU
-            if isinstance(x, list):
-                x = [tensor.to(device) if torch.is_tensor(tensor) else tensor for tensor in x]
-            elif torch.is_tensor(x):
-                x = x.to(device)
-            
-            # Run DataParallel forward
-            output = dp_model(x, **kwargs)
-            
-            # Clean up
-            del dp_model
-            del model_wrapper
-            
-            return output
+            return original_forward(**gpu_kwargs)
 
     def cleanup(self):
         """Cleanup distributed resources"""
