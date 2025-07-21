@@ -477,14 +477,12 @@ class WanDistributedModel(WanVideoModel):
                 
                 # Process on this GPU
                 with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                    # Create args for this GPU
-                    gpu_args = list(args)
-                    gpu_args[0] = gpu_frames
+                    # Create args for this GPU - avoid duplicate 'x' argument
                     gpu_kwargs = kwargs.copy()
                     gpu_kwargs['x'] = gpu_frames
                     
                     # Run forward pass on this GPU
-                    gpu_output = original_forward(*gpu_args, **gpu_kwargs)
+                    gpu_output = original_forward(**gpu_kwargs)
                     outputs.append(gpu_output)
             
             # Combine outputs
@@ -523,12 +521,10 @@ class WanDistributedModel(WanVideoModel):
                     
                     # Process on this GPU
                     with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                        gpu_args = list(args)
-                        gpu_args[0] = x_chunk
                         gpu_kwargs = kwargs.copy()
                         gpu_kwargs['x'] = x_chunk
                         
-                        gpu_output = original_forward(*gpu_args, **gpu_kwargs)
+                        gpu_output = original_forward(**gpu_kwargs)
                         outputs.append(gpu_output)
                 
                 # Combine outputs
@@ -554,12 +550,10 @@ class WanDistributedModel(WanVideoModel):
                     
                     # Process on this GPU
                     with torch.cuda.device(device), torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                        gpu_args = list(args)
-                        gpu_args[0] = x_batch
                         gpu_kwargs = kwargs.copy()
                         gpu_kwargs['x'] = x_batch
                         
-                        gpu_output = original_forward(*gpu_args, **gpu_kwargs)
+                        gpu_output = original_forward(**gpu_kwargs)
                         outputs.append(gpu_output)
                 
                 # Combine outputs
