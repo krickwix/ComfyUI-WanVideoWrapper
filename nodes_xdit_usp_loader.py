@@ -314,11 +314,6 @@ class WanDistributedModel(WanVideoModel):
             log.info(f"   - Model has blocks: {hasattr(model, 'blocks')}")
             log.info(f"   - Number of blocks: {len(model.blocks) if hasattr(model, 'blocks') and model.blocks is not None else 'None'}")
             
-            # Create DataParallel wrapper for multi-GPU inference
-            log.info("🔧 Setting up DataParallel for multi-GPU inference...")
-            self.parallel_model = torch.nn.DataParallel(model, device_ids=self.gpu_devices)
-            log.info(f"✅ DataParallel setup complete with devices: {self.gpu_devices}")
-            
             # Shard transformer blocks across GPUs (most memory intensive)
             if hasattr(model, 'blocks') and model.blocks is not None and len(model.blocks) > 0:
                 blocks_per_gpu = max(1, len(model.blocks) // len(self.gpu_devices))
@@ -396,25 +391,32 @@ class WanDistributedModel(WanVideoModel):
             model.main_device = f"cuda:{self.gpu_devices[0]}"
             log.info(f"   - Main device set to: {model.main_device}")
             
-            # Override the model's forward method to use DataParallel
+            # Override the model's forward method to ensure multi-GPU utilization
             original_forward = model.forward
-            def parallel_forward(*args, **kwargs):
-                # Ensure input is on the correct device
+            def multi_gpu_forward(*args, **kwargs):
+                # Handle input properly - x can be a list of tensors for video processing
                 x = args[0] if len(args) > 0 else kwargs.get('x')
                 if x is not None:
-                    x = x.to(f"cuda:{self.gpu_devices[0]}")
+                    if isinstance(x, list):
+                        # If x is a list of tensors, move each tensor to the correct device
+                        x = [tensor.to(f"cuda:{self.gpu_devices[0]}") if torch.is_tensor(tensor) else tensor for tensor in x]
+                    elif torch.is_tensor(x):
+                        # If x is a single tensor, move it to the correct device
+                        x = x.to(f"cuda:{self.gpu_devices[0]}")
+                    
                     if len(args) > 0:
                         args = list(args)
                         args[0] = x
                     if 'x' in kwargs:
                         kwargs['x'] = x
                 
-                # Use DataParallel for inference
+                # Use the original forward method with device-sharded model
+                # The model components are already distributed across GPUs
                 with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                    return self.parallel_model(*args, **kwargs)
+                    return original_forward(*args, **kwargs)
             
-            model.forward = parallel_forward
-            log.info("✅ Model forward method overridden to use DataParallel")
+            model.forward = multi_gpu_forward
+            log.info("✅ Model forward method overridden for multi-GPU utilization")
             
             log.info("✅ Device sharding applied successfully")
             log.info(f"   - Model distributed across {len(self.gpu_devices)} GPUs")
@@ -447,27 +449,25 @@ class WanDistributedModel(WanVideoModel):
         
         model = self.diffusion_model
         
-        # Use DataParallel for simple multi-GPU inference
-        # This will automatically split the input across available GPUs
-        if not hasattr(self, '_parallel_model'):
-            log.info("🔧 Setting up DataParallel for multi-GPU inference...")
-            self._parallel_model = torch.nn.DataParallel(model, device_ids=self.gpu_devices)
-            log.info(f"✅ DataParallel setup complete with devices: {self.gpu_devices}")
-        
         # Ensure input is on the correct device
         x = args[0] if len(args) > 0 else kwargs.get('x')
         if x is not None:
-            # Move input to first GPU
-            x = x.to(f"cuda:{self.gpu_devices[0]}")
+            if isinstance(x, list):
+                # If x is a list of tensors, move each tensor to the correct device
+                x = [tensor.to(f"cuda:{self.gpu_devices[0]}") if torch.is_tensor(tensor) else tensor for tensor in x]
+            elif torch.is_tensor(x):
+                # If x is a single tensor, move it to the correct device
+                x = x.to(f"cuda:{self.gpu_devices[0]}")
+            
             if len(args) > 0:
                 args = list(args)
                 args[0] = x
             if 'x' in kwargs:
                 kwargs['x'] = x
         
-        # Run inference using DataParallel
+        # Run inference using the device-sharded model
         with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-            output = self._parallel_model(*args, **kwargs)
+            output = model(*args, **kwargs)
         
         return output
 
