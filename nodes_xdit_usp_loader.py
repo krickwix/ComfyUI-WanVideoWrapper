@@ -449,12 +449,11 @@ class WanDistributedModel(WanVideoModel):
             frames_per_gpu = max(1, num_frames // len(self.gpu_devices))
             log.info(f"📹 Processing {num_frames} video frames across {len(self.gpu_devices)} GPUs ({frames_per_gpu} frames per GPU)")
             
-            # For single frame, split the tensor across GPUs instead of using just one GPU
+            # For single frame, use DataParallel approach instead of tensor splitting
             if num_frames == 1 and len(self.gpu_devices) > 1:
-                log.info(f"INFO: Single frame detected, splitting tensor across {len(self.gpu_devices)} GPUs for parallel processing")
-                # Convert single frame to tensor and split across GPUs
-                single_frame = x[0] if torch.is_tensor(x[0]) else torch.tensor(x[0])
-                return self._split_tensor_across_gpus(original_forward, single_frame, kwargs)
+                log.info(f"INFO: Single frame detected, using DataParallel across {len(self.gpu_devices)} GPUs")
+                # Use DataParallel for single frame to avoid tensor dimension issues
+                return self._data_parallel_forward(original_forward, x, kwargs)
             elif num_frames < len(self.gpu_devices):
                 log.info(f"INFO: Fewer frames ({num_frames}) than GPUs ({len(self.gpu_devices)}), using only first {num_frames} GPUs")
                 active_gpus = self.gpu_devices[:num_frames]
@@ -617,70 +616,45 @@ class WanDistributedModel(WanVideoModel):
             with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
                 return original_forward(*args, **kwargs)
 
-    def _split_tensor_across_gpus(self, original_forward, tensor, kwargs):
-        """Split a single tensor across multiple GPUs for parallel processing"""
-        log.info(f"INFO: Splitting tensor with shape {tensor.shape} across {len(self.gpu_devices)} GPUs")
+    def _data_parallel_forward(self, original_forward, x, kwargs):
+        """Use DataParallel approach for single frame to utilize multiple GPUs"""
+        log.info(f"INFO: Using DataParallel for single frame processing")
         
-        # Determine the best dimension to split
-        if len(tensor.shape) >= 2:
-            # Split along the second dimension (sequence length or features)
-            split_dim = 1
-            total_size = tensor.shape[split_dim]
-        else:
-            # Split along the first dimension
-            split_dim = 0
-            total_size = tensor.shape[split_dim]
-        
-        chunks_per_gpu = max(1, total_size // len(self.gpu_devices))
-        log.info(f"INFO: Splitting dimension {split_dim} (size {total_size}) into {chunks_per_gpu} chunks per GPU")
-        
-        outputs = []
-        for i, gpu_idx in enumerate(self.gpu_devices):
-            start_idx = i * chunks_per_gpu
-            end_idx = start_idx + chunks_per_gpu if i < len(self.gpu_devices) - 1 else total_size
+        # Create a temporary model wrapper for DataParallel
+        class ModelWrapper(torch.nn.Module):
+            def __init__(self, forward_func):
+                super().__init__()
+                self.forward_func = forward_func
             
-            if start_idx >= total_size:
-                break
-            
-            # Get chunk for this GPU
-            device = f"cuda:{gpu_idx}"
-            if split_dim == 0:
-                tensor_chunk = tensor[start_idx:end_idx].to(device)
-            else:
-                tensor_chunk = tensor[:, start_idx:end_idx].to(device)
-            
-            # Process on this GPU
-            with torch.cuda.device(device):
-                with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
-                    gpu_kwargs = kwargs.copy()
-                    gpu_kwargs['x'] = [tensor_chunk]  # Wrap in list to maintain format
-                    
-                    gpu_output = original_forward(**gpu_kwargs)
-                    outputs.append(gpu_output)
+            def forward(self, x, **kwargs):
+                return self.forward_func(x, **kwargs)
         
-        # Combine outputs
-        if outputs:
-            if isinstance(outputs[0], tuple):
-                # If output is a tuple (noise_pred, cache_state), handle separately
-                noise_preds = [output[0] for output in outputs]
-                cache_states = [output[1] for output in outputs]
-                
-                # Combine noise predictions along the split dimension
-                if isinstance(noise_preds[0], list):
-                    combined_noise_pred = []
-                    for noise_pred_list in noise_preds:
-                        combined_noise_pred.extend(noise_pred_list)
-                else:
-                    combined_noise_pred = torch.cat(noise_preds, dim=split_dim)
-                
-                # Combine cache states (usually just use the last one)
-                combined_cache_state = cache_states[-1]
-                
-                return (combined_noise_pred, combined_cache_state)
-            else:
-                return torch.cat(outputs, dim=split_dim)
-        else:
-            return original_forward(**kwargs)
+        # Wrap the forward function
+        model_wrapper = ModelWrapper(original_forward)
+        
+        # Move to first GPU and apply DataParallel
+        device = f"cuda:{self.gpu_devices[0]}"
+        model_wrapper = model_wrapper.to(device)
+        
+        # Use DataParallel to distribute across all GPUs
+        dp_model = torch.nn.DataParallel(model_wrapper, device_ids=self.gpu_devices)
+        
+        # Process the input
+        with torch.cuda.amp.autocast(enabled=True, dtype=torch.bfloat16):
+            # Move input to the first GPU
+            if isinstance(x, list):
+                x = [tensor.to(device) if torch.is_tensor(tensor) else tensor for tensor in x]
+            elif torch.is_tensor(x):
+                x = x.to(device)
+            
+            # Run DataParallel forward
+            output = dp_model(x, **kwargs)
+            
+            # Clean up
+            del dp_model
+            del model_wrapper
+            
+            return output
 
     def cleanup(self):
         """Cleanup distributed resources"""
