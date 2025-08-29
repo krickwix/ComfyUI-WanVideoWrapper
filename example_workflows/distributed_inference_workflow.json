@@ -1,4 +1,7 @@
 {
+  "id": "wanvideo-distributed-inference-workflow",
+  "version": "3.0.0",
+  "revision": 0,
   "last_node_id": 8,
   "last_link_id": 12,
   "nodes": [
@@ -6,116 +9,234 @@
       "id": 1,
       "type": "WanVideoDistributedConfig",
       "pos": [100, 100],
-      "size": {"0": 300, "1": 400},
+      "size": [300, 400],
       "flags": {},
       "order": 0,
       "mode": 0,
-      "inputs": {
-        "gpu_count": 2,
-        "use_ulysses": true,
-        "use_fsdp": true,
-        "offload_model": true,
-        "master_port": 29501,
-        "memory_optimization": true,
-        "torch_compile": false,
-        "mixed_precision": "bf16"
-      }
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "config",
+          "type": "DISTRIBUTED_CONFIG",
+          "slot_index": 0,
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "latest",
+        "Node name for S&R": "WanVideoDistributedConfig"
+      },
+      "widgets_values": [
+        2,
+        true,
+        true,
+        true,
+        29501,
+        true,
+        false,
+        "bf16"
+      ],
+      "color": "#332922",
+      "bgcolor": "#593930"
     },
     {
       "id": 2,
       "type": "LoadWanVideoModel",
       "pos": [500, 100],
-      "size": {"0": 300, "1": 400},
+      "size": [300, 400],
       "flags": {},
       "order": 1,
       "mode": 0,
-      "inputs": {
-        "model": "Wan2.2-T2V-A14B",
-        "base_precision": "bf16",
-        "load_device": "offload_device",
-        "quantization": "disabled"
-      }
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "WANVIDEOMODEL",
+          "slot_index": 0,
+          "links": [1]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "latest",
+        "Node name for S&R": "LoadWanVideoModel"
+      },
+      "widgets_values": [
+        "Wan2.2-T2V-A14B",
+        "bf16",
+        "offload_device",
+        "disabled"
+      ],
+      "color": "#332922",
+      "bgcolor": "#593930"
     },
     {
       "id": 3,
       "type": "LoadWanVideoT5TextEncoder",
       "pos": [500, 600],
-      "size": {"0": 300, "1": 400},
+      "size": [300, 400],
       "flags": {},
       "order": 2,
       "mode": 0,
-      "inputs": {
-        "model_name": "umt5-xxl",
-        "precision": "bf16",
-        "load_device": "offload_device",
-        "quantization": "disabled"
-      }
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "wan_t5_model",
+          "type": "WANTEXTENCODER",
+          "slot_index": 0,
+          "links": [2]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "latest",
+        "Node name for S&R": "LoadWanVideoT5TextEncoder"
+      },
+      "widgets_values": [
+        "umt5-xxl",
+        "bf16",
+        "offload_device",
+        "disabled"
+      ],
+      "color": "#332922",
+      "bgcolor": "#593930"
     },
     {
       "id": 4,
       "type": "WanVideoTextEncode",
       "pos": [900, 600],
-      "size": {"0": 300, "1": 400},
+      "size": [300, 400],
       "flags": {},
       "order": 3,
       "mode": 0,
-      "inputs": {
-        "t5": "umt5-xxl",
-        "prompt": "A futuristic cityscape with flying cars and neon lights at night, cinematic lighting",
-        "negative_prompt": "",
-        "model_to_offload": null
-      }
+      "inputs": [
+        {
+          "name": "t5",
+          "type": "WANTEXTENCODER",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "text_embeds",
+          "type": "WANVIDEOTEXTEMBEDS",
+          "slot_index": 0,
+          "links": [3]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "latest",
+        "Node name for S&R": "WanVideoTextEncode"
+      },
+      "widgets_values": [
+        "A futuristic cityscape with flying cars and neon lights at night, cinematic lighting",
+        "",
+        null
+      ],
+      "color": "#332922",
+      "bgcolor": "#593930"
     },
     {
       "id": 5,
       "type": "WanVideoDistributedInference",
       "pos": [1300, 300],
-      "size": {"0": 400, "1": 600},
+      "size": [400, 600],
       "flags": {},
       "order": 4,
       "mode": 0,
-      "inputs": {
-        "model": "Wan2.2-T2V-A14B",
-        "text_embeds": "text_embeds",
-        "prompt": "A futuristic cityscape with flying cars and neon lights at night, cinematic lighting",
-        "negative_prompt": "",
-        "width": 832,
-        "height": 480,
-        "num_frames": 121,
-        "num_inference_steps": 20,
-        "guidance_scale": 7.5,
-        "seed": 42,
-        "gpu_count": 2,
-        "use_ulysses": true,
-        "use_fsdp": true,
-        "offload_model": true,
-        "sample_steps": 20,
-        "custom_script_path": "",
-        "model_cache_dir": "",
-        "output_format": "mp4",
-        "fps": 60
-      }
+      "inputs": [
+        {
+          "name": "model",
+          "type": "WANVIDEOMODEL",
+          "link": 1
+        },
+        {
+          "name": "text_embeds",
+          "type": "WANVIDEOTEXTEMBEDS",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "video_path",
+          "type": "STRING",
+          "slot_index": 0,
+          "links": [4]
+        },
+        {
+          "name": "log_output",
+          "type": "STRING",
+          "slot_index": 1,
+          "links": []
+        },
+        {
+          "name": "status",
+          "type": "STRING",
+          "slot_index": 2,
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "latest",
+        "Node name for S&R": "WanVideoDistributedInference"
+      },
+      "widgets_values": [
+        "A futuristic cityscape with flying cars and neon lights at night, cinematic lighting",
+        "",
+        832,
+        480,
+        121,
+        20,
+        7.5,
+        42,
+        2,
+        true,
+        true,
+        true,
+        20,
+        "",
+        "",
+        "mp4",
+        60
+      ],
+      "color": "#332922",
+      "bgcolor": "#593930"
     },
     {
       "id": 6,
       "type": "SaveVideo",
       "pos": [1800, 300],
-      "size": {"0": 200, "1": 200},
+      "size": [200, 200],
       "flags": {},
       "order": 5,
       "mode": 0,
-      "inputs": {
-        "video_path": "video_path",
-        "filename_prefix": "wanvideo_distributed"
-      }
+      "inputs": [
+        {
+          "name": "video_path",
+          "type": "STRING",
+          "link": 4
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "cnr_id": "ComfyUI-WanVideoWrapper",
+        "ver": "latest",
+        "Node name for S&R": "SaveVideo"
+      },
+      "widgets_values": [
+        "wanvideo_distributed"
+      ],
+      "color": "#332922",
+      "bgcolor": "#593930"
     }
   ],
   "links": [
-    [1, 1, 0, 2, 0],
-    [2, 2, 0, 5, 0],
-    [3, 3, 0, 4, 0],
-    [4, 4, 0, 5, 1],
-    [5, 5, 0, 6, 0],
-    [6, 5, 1, 6, 1]
+    [1, 2, 0, 5, 0],
+    [2, 3, 0, 4, 0],
+    [3, 4, 0, 5, 1],
+    [4, 5, 0, 6, 0]
   ]
 }
