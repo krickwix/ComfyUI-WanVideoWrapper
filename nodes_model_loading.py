@@ -974,6 +974,10 @@ class WanVideoModelLoader:
                 lora_low_mem_load = l.get("low_mem_load", False)
                 merge_loras = l.get("merge_loras", True)
 
+        # Get device information
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device()
+
         transformer = None
         mm.unload_all_models()
         mm.cleanup_models()
@@ -1441,10 +1445,10 @@ class WanVideoModelLoader:
             os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(gpu_count))
             
             # Move model to GPU 0 first
-            device = torch.device("cuda:0")
-            patcher.model.diffusion_model = patcher.model.diffusion_model.to(device)
+            gpu_device = torch.device("cuda:0")
+            patcher.model.diffusion_model = patcher.model.diffusion_model.to(gpu_device)
             
-            log.info(f"Model moved to {device}")
+            log.info(f"Model moved to {gpu_device}")
             log.info(f"Model device: {next(patcher.model.diffusion_model.parameters()).device}")
             
             # Distribute the model across GPUs
@@ -1464,7 +1468,7 @@ class WanVideoModelLoader:
                             patcher.model.diffusion_model,
                             auto_wrap_policy=size_based_auto_wrap_policy,
                             min_num_params=1000000,  # 1M parameters
-                            device_id=device
+                            device_id=gpu_device
                         )
                         log.info("Model wrapped with FSDP for distributed inference")
                         
