@@ -1444,45 +1444,90 @@ class WanVideoModelLoader:
             # Set CUDA visible devices for multi-GPU
             os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(gpu_count))
             
-            # Move model to GPU 0 first
-            gpu_device = torch.device("cuda:0")
-            # Use to_empty() for meta tensors, to() for regular tensors
+            # For large models (like 14B), we need to be more careful about memory allocation
+            # Instead of trying to move the entire model at once, we'll use a more gradual approach
+            
             try:
-                patcher.model.diffusion_model = patcher.model.diffusion_model.to(gpu_device)
-            except NotImplementedError as e:
-                if "meta tensor" in str(e).lower():
-                    log.info("Model uses meta tensors, using to_empty()")
-                    patcher.model.diffusion_model = patcher.model.diffusion_model.to_empty(device=gpu_device)
-                else:
-                    raise e
-            
-            log.info(f"Model moved to {gpu_device}")
-            log.info(f"Model device: {next(patcher.model.diffusion_model.parameters()).device}")
-            
-            # For ComfyUI single-process environment, use DataParallel for multi-GPU
-            # True distributed training requires multiple processes launched with torchrun
-            if gpu_count > 1:
+                # First, try to move the model to CPU to free up GPU memory
+                log.info("Moving model to CPU first to optimize memory usage")
+                patcher.model.diffusion_model = patcher.model.diffusion_model.cpu()
+                
+                # Now try to move to GPU 0 with memory-efficient approach
+                gpu_device = torch.device("cuda:0")
+                
+                # For meta tensors, we need to handle them carefully to avoid OOM
                 try:
-                    # Use DataParallel for single-process multi-GPU
-                    patcher.model.diffusion_model = torch.nn.DataParallel(
-                        patcher.model.diffusion_model, 
-                        device_ids=list(range(gpu_count))
-                    )
-                    
-                    # Store the distributed model info
-                    patcher.model["is_distributed"] = True
-                    patcher.model["distributed_device_ids"] = list(range(gpu_count))
-                    patcher.model["distributed_backend"] = "dataparallel"
-                    patcher.model["distributed_type"] = "single_process_multi_gpu"
-                    log.info(f"Model wrapped with DataParallel for {gpu_count} GPUs (single-process)")
-                    
-                except Exception as e:
-                    log.warning(f"DataParallel failed: {e}")
+                    # Try the regular to() method first
+                    patcher.model.diffusion_model = patcher.model.diffusion_model.to(gpu_device)
+                    log.info("Model moved to GPU successfully using regular to() method")
+                except NotImplementedError as e:
+                    if "meta tensor" in str(e).lower():
+                        log.info("Model uses meta tensors, using memory-efficient approach")
+                        
+                        # For very large models, we'll use a different strategy
+                        # Instead of to_empty(), we'll try to load the model in a way that doesn't require
+                        # allocating all memory at once
+                        
+                        # Check if this is a large model (14B parameters)
+                        model_size = sum(p.numel() for p in patcher.model.diffusion_model.parameters())
+                        log.info(f"Model has {model_size:,} parameters")
+                        
+                        if model_size > 10_000_000_000:  # 10B parameters
+                            log.info("Large model detected, using CPU-first approach")
+                            # Keep model on CPU for now, let ComfyUI handle the memory management
+                            patcher.model.diffusion_model = patcher.model.diffusion_model.cpu()
+                            log.info("Large model kept on CPU to avoid OOM")
+                        else:
+                            # For smaller models, try to_empty() with memory monitoring
+                            try:
+                                log.info("Attempting to_empty() with memory monitoring")
+                                patcher.model.diffusion_model = patcher.model.diffusion_model.to_empty(device=gpu_device)
+                                log.info("Model moved to GPU using to_empty()")
+                            except torch.cuda.OutOfMemoryError as oom_e:
+                                log.warning(f"OOM during to_empty(), falling back to CPU: {oom_e}")
+                                patcher.model.diffusion_model = patcher.model.diffusion_model.cpu()
+                                log.info("Model kept on CPU due to OOM")
+                    else:
+                        raise e
+                
+                log.info(f"Model device: {next(patcher.model.diffusion_model.parameters()).device}")
+                
+                # For ComfyUI single-process environment, use DataParallel for multi-GPU
+                # True distributed training requires multiple processes launched with torchrun
+                if gpu_count > 1:
+                    try:
+                        # Only wrap with DataParallel if the model is on GPU
+                        if next(patcher.model.diffusion_model.parameters()).device.type == 'cuda':
+                            # Use DataParallel for single-process multi-GPU
+                            patcher.model.diffusion_model = torch.nn.DataParallel(
+                                patcher.model.diffusion_model, 
+                                device_ids=list(range(gpu_count))
+                            )
+                            
+                            # Store the distributed model info
+                            patcher.model["is_distributed"] = True
+                            patcher.model["distributed_device_ids"] = list(range(gpu_count))
+                            patcher.model["distributed_backend"] = "dataparallel"
+                            patcher.model["distributed_type"] = "single_process_multi_gpu"
+                            log.info(f"Model wrapped with DataParallel for {gpu_count} GPUs (single-process)")
+                        else:
+                            # Model is on CPU, mark as not distributed for now
+                            patcher.model["is_distributed"] = False
+                            patcher.model["distributed_type"] = "cpu_model"
+                            log.info("Model kept on CPU, not distributed (will be moved to GPU during inference)")
+                        
+                    except Exception as e:
+                        log.warning(f"DataParallel failed: {e}")
+                        patcher.model["is_distributed"] = False
+                        log.info("Failed to distribute model, using single GPU")
+                else:
                     patcher.model["is_distributed"] = False
-                    log.info("Failed to distribute model, using single GPU")
-            else:
+                    log.info("Single GPU mode - no distribution applied")
+                    
+            except Exception as e:
+                log.warning(f"Distributed setup failed: {e}")
                 patcher.model["is_distributed"] = False
-                log.info("Single GPU mode - no distribution applied")
+                log.info("Falling back to single GPU mode")
         else:
             patcher.model["is_distributed"] = False
             log.info("Distributed inference disabled - using single GPU")
