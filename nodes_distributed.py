@@ -79,6 +79,14 @@ class WanVideoDistributedInference:
             use_fsdp = getattr(model, 'use_fsdp', True)
             master_port = getattr(model, 'master_port', 29501)
             
+            # Try to get distributed options from the model dictionary if they exist
+            if hasattr(model, 'model') and isinstance(model.model, dict):
+                enable_distributed = model.model.get('enable_distributed', enable_distributed)
+                gpu_count = model.model.get('gpu_count', gpu_count)
+                use_ulysses = model.model.get('use_ulysses', use_ulysses)
+                use_fsdp = model.model.get('use_fsdp', use_fsdp)
+                master_port = model.model.get('master_port', master_port)
+            
             # Check if distributed inference is enabled
             if not enable_distributed:
                 return "", "", "ERROR: Distributed inference is not enabled for this model. Set enable_distributed=True in LoadWanVideoModel"
@@ -134,6 +142,21 @@ class WanVideoDistributedInference:
             if hasattr(model, 'model_path'):
                 return model.model_path
             
+            # Check if it's a WanVideoModel with base_path info
+            if hasattr(model, 'base_path'):
+                return model.base_path
+            
+            # Check if it's a WanVideoModel with model_name info
+            if hasattr(model, 'model_name'):
+                model_name = model.model_name
+                # Try to get the full path from folder_paths
+                try:
+                    return folder_paths.get_full_path("diffusion_models", model_name)
+                except:
+                    # If that fails, try to construct the path manually
+                    models_dir = folder_paths.models_dir
+                    return os.path.join(models_dir, "diffusion_models", model_name)
+            
             # Check if it's a WanVideoModel with pipeline info
             if hasattr(model, 'pipeline') and 'model_path' in model.pipeline:
                 return model.pipeline['model_path']
@@ -141,7 +164,12 @@ class WanVideoDistributedInference:
             # Try to get from folder_paths
             model_name = getattr(model, 'model_name', None)
             if model_name:
-                return folder_paths.get_full_path("diffusion_models", model_name)
+                try:
+                    return folder_paths.get_full_path("diffusion_models", model_name)
+                except:
+                    # If that fails, try to construct the path manually
+                    models_dir = folder_paths.models_dir
+                    return os.path.join(models_dir, "diffusion_models", model_name)
             
             logger.warning("Could not determine model path from model object")
             return None
