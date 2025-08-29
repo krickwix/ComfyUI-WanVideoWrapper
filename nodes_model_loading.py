@@ -1459,47 +1459,27 @@ class WanVideoModelLoader:
             log.info(f"Model moved to {gpu_device}")
             log.info(f"Model device: {next(patcher.model.diffusion_model.parameters()).device}")
             
-            # Distribute the model across GPUs
+            # For ComfyUI single-process environment, use DataParallel for multi-GPU
+            # True distributed training requires multiple processes launched with torchrun
             if gpu_count > 1:
-                if use_fsdp and hasattr(torch.distributed.fsdp, 'FullyShardedDataParallel'):
-                    try:
-                        # Use FSDP for model sharding
-                        import torch.distributed as dist
-                        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-                        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
-                        
-                        # Initialize distributed process group
-                        dist.init_process_group("nccl", rank=0, world_size=1)
-                        
-                        # Wrap model with FSDP
-                        patcher.model.diffusion_model = FSDP(
-                            patcher.model.diffusion_model,
-                            auto_wrap_policy=size_based_auto_wrap_policy,
-                            min_num_params=1000000,  # 1M parameters
-                            device_id=gpu_device
-                        )
-                        log.info("Model wrapped with FSDP for distributed inference")
-                        
-                    except Exception as e:
-                        log.warning(f"FSDP failed, falling back to DataParallel: {e}")
-                        # Fallback to DataParallel
-                        patcher.model.diffusion_model = torch.nn.DataParallel(
-                            patcher.model.diffusion_model, 
-                            device_ids=list(range(gpu_count))
-                        )
-                        log.info("Model wrapped with DataParallel for distributed inference")
-                else:
-                    # Use DataParallel for simpler multi-GPU distribution
+                try:
+                    # Use DataParallel for single-process multi-GPU
                     patcher.model.diffusion_model = torch.nn.DataParallel(
                         patcher.model.diffusion_model, 
                         device_ids=list(range(gpu_count))
                     )
-                    log.info("Model wrapped with DataParallel for distributed inference")
-                
-                # Store the distributed model info
-                patcher.model["is_distributed"] = True
-                patcher.model["distributed_device_ids"] = list(range(gpu_count))
-                log.info(f"Model successfully distributed across {gpu_count} GPUs")
+                    
+                    # Store the distributed model info
+                    patcher.model["is_distributed"] = True
+                    patcher.model["distributed_device_ids"] = list(range(gpu_count))
+                    patcher.model["distributed_backend"] = "dataparallel"
+                    patcher.model["distributed_type"] = "single_process_multi_gpu"
+                    log.info(f"Model wrapped with DataParallel for {gpu_count} GPUs (single-process)")
+                    
+                except Exception as e:
+                    log.warning(f"DataParallel failed: {e}")
+                    patcher.model["is_distributed"] = False
+                    log.info("Failed to distribute model, using single GPU")
             else:
                 patcher.model["is_distributed"] = False
                 log.info("Single GPU mode - no distribution applied")

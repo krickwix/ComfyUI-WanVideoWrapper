@@ -78,11 +78,17 @@ class WanVideoDistributedInference:
                 master_port = model.model.get('master_port', master_port)
                 is_distributed = model.model.get('is_distributed', False)
                 distributed_device_ids = model.model.get('distributed_device_ids', [])
+                distributed_backend = model.model.get('distributed_backend', 'unknown')
+                distributed_type = model.model.get('distributed_type', 'unknown')
             else:
                 is_distributed = False
                 distributed_device_ids = []
+                distributed_backend = 'unknown'
+                distributed_type = 'unknown'
             
             logger.info(f"Starting distributed inference with {gpu_count} GPUs")
+            logger.info(f"Distributed backend: {distributed_backend}")
+            logger.info(f"Distributed type: {distributed_type}")
             
             # Check if distributed inference is enabled
             if not enable_distributed:
@@ -105,7 +111,7 @@ class WanVideoDistributedInference:
                 model, text_embeds, prompt, negative_prompt, width, height,
                 num_frames, num_inference_steps, guidance_scale, seed, offload_model, sample_steps,
                 gpu_count, use_ulysses, use_fsdp, master_port, output_dir, output_format, fps,
-                is_distributed, distributed_device_ids
+                is_distributed, distributed_device_ids, distributed_backend, distributed_type
             )
             
             if result["success"]:
@@ -126,7 +132,7 @@ class WanVideoDistributedInference:
     def _run_distributed_inference_with_model(self, model, text_embeds, prompt, negative_prompt, width, height,
                                              num_frames, num_inference_steps, guidance_scale, seed, offload_model, sample_steps,
                                              gpu_count, use_ulysses, use_fsdp, master_port, output_dir, output_format, fps,
-                                             is_distributed, distributed_device_ids):
+                                             is_distributed, distributed_device_ids, distributed_backend, distributed_type):
         """Run inference using the already-distributed model"""
         try:
             logger.info(f"Running inference with distributed model across {gpu_count} GPUs")
@@ -151,6 +157,8 @@ Distributed Inference Started:
 - GPUs: {gpu_count}
 - Ulysses: {use_ulysses}
 - FSDP: {use_fsdp}
+- Distributed Backend: {distributed_backend}
+- Distributed Type: {distributed_type}
 - Model device: {next(actual_model.parameters()).device}
 - Available GPUs: {torch.cuda.device_count()}
 - Current GPU: {torch.cuda.current_device()}
@@ -160,6 +168,9 @@ Distributed Inference Started:
 - Distributed device IDs: {distributed_device_ids}
 - CUDA memory allocated: {torch.cuda.memory_allocated(0) / 1024**3:.2f} GB
 - CUDA memory cached: {torch.cuda.memory_reserved(0) / 1024**3:.2f} GB
+
+Note: This is using {distributed_type} distribution.
+For true multi-process distributed inference, use the distributed_inference_launcher.py script with torchrun.
 """
             
             # This is where you would implement the actual WanVideo inference logic
