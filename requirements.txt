@@ -9,3 +9,4 @@ pyloudnorm
 gguf>=0.14.0
 opencv-python
 scipy
+deepspeed
