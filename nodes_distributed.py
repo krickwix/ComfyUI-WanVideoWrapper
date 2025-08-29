@@ -41,9 +41,6 @@ class WanVideoDistributedInference:
                 "num_inference_steps": ("INT", {"default": 20, "min": 4, "max": 50, "tooltip": "Number of denoising steps"}),
                 "guidance_scale": ("FLOAT", {"default": 7.5, "min": 1.0, "max": 20.0, "tooltip": "Classifier-free guidance scale"}),
                 "seed": ("INT", {"default": 42, "tooltip": "Random seed for generation"}),
-                "gpu_count": ("INT", {"default": 2, "min": 1, "max": 8, "tooltip": "Number of GPUs to use for distributed inference"}),
-                "use_ulysses": ("BOOLEAN", {"default": True, "tooltip": "Enable Ulysses distribution for multi-GPU"}),
-                "use_fsdp": ("BOOLEAN", {"default": True, "tooltip": "Enable FSDP for model sharding"}),
                 "offload_model": ("BOOLEAN", {"default": True, "tooltip": "Offload model to CPU to save VRAM"}),
                 "sample_steps": ("INT", {"default": 20, "min": 4, "max": 50, "tooltip": "Number of sampling steps (4 for Lightning)"}),
             },
@@ -62,8 +59,7 @@ class WanVideoDistributedInference:
     DESCRIPTION = "Run Wan2.2-Lightning inference with multi-GPU Ulysses distribution"
     
     def run_distributed_inference(self, model, text_embeds, prompt, negative_prompt, width, height, 
-                                 num_frames, num_inference_steps, guidance_scale, seed, gpu_count,
-                                 use_ulysses, use_fsdp, offload_model, sample_steps,
+                                 num_frames, num_inference_steps, guidance_scale, seed, offload_model, sample_steps,
                                  custom_script_path="", model_cache_dir="", output_format="mp4", fps=60):
         """
         Run distributed inference using Ulysses distribution
@@ -75,6 +71,17 @@ class WanVideoDistributedInference:
             model_path = self._get_model_path_from_model(model)
             if not model_path:
                 return "", "", "ERROR: Could not determine model path from loaded model"
+            
+            # Get distributed configuration from the model
+            enable_distributed = getattr(model, 'enable_distributed', False)
+            gpu_count = getattr(model, 'gpu_count', 2)
+            use_ulysses = getattr(model, 'use_ulysses', True)
+            use_fsdp = getattr(model, 'use_fsdp', True)
+            master_port = getattr(model, 'master_port', 29501)
+            
+            # Check if distributed inference is enabled
+            if not enable_distributed:
+                return "", "", "ERROR: Distributed inference is not enabled for this model. Set enable_distributed=True in LoadWanVideoModel"
             
             # Create temporary output directory
             output_dir = tempfile.mkdtemp(prefix="wanvideo_distributed_")

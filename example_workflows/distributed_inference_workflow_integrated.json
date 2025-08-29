@@ -1,9 +1,9 @@
 {
-  "id": "wanvideo-distributed-inference-workflow",
+  "id": "wanvideo-distributed-inference-integrated",
   "version": "3.0.0",
   "revision": 0,
-  "last_node_id": 8,
-  "last_link_id": 12,
+  "last_node_id": 4,
+  "last_link_id": 3,
   "nodes": [
     {
       "id": 1,
@@ -50,11 +50,10 @@
       "color": "#332922",
       "bgcolor": "#593930"
     },
-
     {
       "id": 2,
       "type": "LoadWanVideoT5TextEncoder",
-      "pos": [500, 600],
+      "pos": [500, 100],
       "size": [300, 400],
       "flags": {},
       "order": 1,
@@ -85,7 +84,7 @@
     {
       "id": 3,
       "type": "WanVideoTextEncode",
-      "pos": [900, 600],
+      "pos": [900, 100],
       "size": [300, 400],
       "flags": {},
       "order": 2,
@@ -119,12 +118,12 @@
       "bgcolor": "#593930"
     },
     {
-      "id": 5,
+      "id": 4,
       "type": "WanVideoDistributedInference",
-      "pos": [1300, 300],
+      "pos": [1300, 100],
       "size": [400, 600],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [
         {
@@ -143,7 +142,7 @@
           "name": "video_path",
           "type": "STRING",
           "slot_index": 0,
-          "links": [4]
+          "links": []
         },
         {
           "name": "log_output",
@@ -172,51 +171,16 @@
         20,
         7.5,
         42,
-        2,
         true,
-        true,
-        true,
-        20,
-        "",
-        "",
-        "mp4",
-        60
-      ],
-      "color": "#332922",
-      "bgcolor": "#593930"
-    },
-    {
-      "id": 6,
-      "type": "SaveVideo",
-      "pos": [1800, 300],
-      "size": [200, 200],
-      "flags": {},
-      "order": 5,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "video_path",
-          "type": "STRING",
-          "link": 4
-        }
-      ],
-      "outputs": [],
-      "properties": {
-        "cnr_id": "ComfyUI-WanVideoWrapper",
-        "ver": "latest",
-        "Node name for S&R": "SaveVideo"
-      },
-      "widgets_values": [
-        "wanvideo_distributed"
+        20
       ],
       "color": "#332922",
       "bgcolor": "#593930"
     }
   ],
   "links": [
-    [1, 2, 0, 5, 0],
-    [2, 3, 0, 4, 0],
-    [3, 4, 0, 5, 1],
-    [4, 5, 0, 6, 0]
+    [1, 1, 0, 4, 0],
+    [2, 2, 0, 3, 0],
+    [3, 3, 0, 4, 1]
   ]
 }

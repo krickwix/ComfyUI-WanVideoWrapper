@@ -947,6 +947,12 @@ class WanVideoModelLoader:
                 "fantasytalking_model": ("FANTASYTALKINGMODEL", {"default": None, "tooltip": "FantasyTalking model https://github.com/Fantasy-AMAP"}),
                 "multitalk_model": ("MULTITALKMODEL", {"default": None, "tooltip": "Multitalk model"}),
                 "fantasyportrait_model": ("FANTASYPORTRAITMODEL", {"default": None, "tooltip": "FantasyPortrait model"}),
+                # Distributed inference options
+                "enable_distributed": ("BOOLEAN", {"default": False, "tooltip": "Enable multi-GPU distributed inference with Ulysses distribution"}),
+                "gpu_count": ("INT", {"default": 2, "min": 2, "max": 8, "tooltip": "Number of GPUs to use for distributed inference"}),
+                "use_ulysses": ("BOOLEAN", {"default": True, "tooltip": "Enable Ulysses distribution for optimal multi-GPU scaling"}),
+                "use_fsdp": ("BOOLEAN", {"default": True, "tooltip": "Enable FSDP for model sharding across GPUs"}),
+                "master_port": ("INT", {"default": 29501, "min": 29500, "max": 29600, "tooltip": "Master port for distributed training"}),
             }
         }
 
@@ -957,7 +963,8 @@ class WanVideoModelLoader:
 
     def loadmodel(self, model, base_precision, load_device,  quantization,
                   compile_args=None, attention_mode="sdpa", block_swap_args=None, lora=None, vram_management_args=None, extra_model=None, vace_model=None,
-                  fantasytalking_model=None, multitalk_model=None, fantasyportrait_model=None):
+                  fantasytalking_model=None, multitalk_model=None, fantasyportrait_model=None,
+                  enable_distributed=False, gpu_count=2, use_ulysses=True, use_fsdp=True, master_port=29501):
         assert not (vram_management_args is not None and block_swap_args is not None), "Can't use both block_swap_args and vram_management_args at the same time"
         if vace_model is not None:
             extra_model = vace_model
@@ -1411,6 +1418,13 @@ class WanVideoModelLoader:
         patcher.model["scale_weights"] = scale_weights
         patcher.model["sd"] = sd
         patcher.model["lora"] = lora
+        
+        # Add distributed inference configuration
+        patcher.model["enable_distributed"] = enable_distributed
+        patcher.model["gpu_count"] = gpu_count
+        patcher.model["use_ulysses"] = use_ulysses
+        patcher.model["use_fsdp"] = use_fsdp
+        patcher.model["master_port"] = master_port
 
         if 'transformer_options' not in patcher.model_options:
             patcher.model_options['transformer_options'] = {}

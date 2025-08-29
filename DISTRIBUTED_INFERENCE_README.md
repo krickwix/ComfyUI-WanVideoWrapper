@@ -4,13 +4,14 @@ This document explains how to use the new distributed inference nodes in ComfyUI
 
 ## 🚀 **Overview**
 
-The distributed inference nodes provide multi-GPU support using the same Ulysses distribution mechanism that we successfully implemented in the standalone Wan2.2-Lightning setup. This allows you to:
+The distributed inference system provides multi-GPU support using the same Ulysses distribution mechanism that we successfully implemented in the standalone Wan2.2-Lightning setup. This allows you to:
 
 - **Scale across multiple GPUs** (2-8 GPUs supported)
 - **Use Ulysses distribution** for optimal memory sharing
 - **Enable FSDP** for model sharding
 - **Maintain the same quality** with faster inference
 - **Integrate seamlessly** with existing ComfyUI workflows
+- **Maintain backward compatibility** with existing workflows
 
 ## 📋 **Prerequisites**
 
@@ -30,34 +31,34 @@ pip install -r requirements.txt
 ### 2. Restart ComfyUI
 After installing DeepSpeed, restart ComfyUI to load the new nodes.
 
-## 🎯 **New Nodes**
+## 🎯 **Integrated Distributed Inference**
 
-### **WanVideoDistributedConfig**
-Configuration node for distributed inference settings.
+### **LoadWanVideoModel - Distributed Options**
+The distributed inference configuration is now integrated directly into the `LoadWanVideoModel` node for seamless compatibility:
 
-**Inputs:**
-- `gpu_count`: Number of GPUs to use (1-8)
-- `use_ulysses`: Enable Ulysses distribution
-- `use_fsdp`: Enable FSDP model sharding
-- `offload_model`: Enable model offloading
-- `master_port`: Port for distributed training
-- `memory_optimization`: Enable memory optimization
-- `torch_compile`: Enable PyTorch compilation
-- `mixed_precision`: Mixed precision mode (bf16/fp16/fp32)
+**Standard Parameters:**
+- `model`: Model name (e.g., "Wan2.2-T2V-A14B")
+- `base_precision`: Precision (bf16, fp16, fp32)
+- `load_device`: Device for loading (main_device, offload_device)
+- `quantization`: Quantization method
+
+**Distributed Inference Options:**
+- `enable_distributed`: Enable multi-GPU inference (default: False)
+- `gpu_count`: Number of GPUs (2-8, default: 2)
+- `use_ulysses`: Enable Ulysses distribution (default: True)
+- `use_fsdp`: Enable FSDP model sharding (default: True)
+- `master_port`: Port for distributed communication (default: 29501)
 
 ### **WanVideoDistributedInference**
-Main distributed inference node that runs multi-GPU inference.
+Main distributed inference node that runs multi-GPU inference using the configuration from the loaded model.
 
 **Inputs:**
-- `model`: WanVideo model to use
+- `model`: WanVideo model with distributed configuration
 - `text_embeds`: Text embeddings from text encoder
 - `prompt`: Text prompt for video generation
 - `width/height`: Video dimensions (832x480 recommended)
 - `num_frames`: Number of video frames (121 = 2 seconds at 60fps)
 - `sample_steps`: Sampling steps (20 for Lightning)
-- `gpu_count`: Number of GPUs to use
-- `use_ulysses`: Enable Ulysses distribution
-- `use_fsdp`: Enable FSDP
 - `offload_model`: Enable model offloading
 
 **Outputs:**
@@ -68,15 +69,37 @@ Main distributed inference node that runs multi-GPU inference.
 ## 🔄 **Workflow Example**
 
 ### **Basic Multi-GPU Workflow**
-1. **Load WanVideo Model**: Use `LoadWanVideoModel` to load your base model
+1. **Load WanVideo Model**: Use `LoadWanVideoModel` with distributed options enabled
 2. **Load Text Encoder**: Use `LoadWanVideoT5TextEncoder` for text processing
 3. **Encode Text**: Use `WanVideoTextEncode` to create text embeddings
-4. **Configure Distribution**: Use `WanVideoDistributedConfig` to set GPU count and options
-5. **Run Inference**: Use `WanVideoDistributedInference` to generate video
-6. **Save Video**: Use `SaveVideo` to save the generated video
+4. **Run Inference**: Use `WanVideoDistributedInference` to generate video
+5. **Save Video**: Use `SaveVideo` to save the generated video
 
-### **Workflow File**
-See `example_workflows/distributed_inference_workflow.json` for a complete example.
+### **Workflow Files**
+- **Integrated Approach**: `example_workflows/distributed_inference_workflow_integrated.json` (recommended)
+- **Legacy Approach**: `example_workflows/distributed_inference_workflow.json` (with separate config node)
+
+## 🔄 **Backward Compatibility**
+
+### **Existing Workflows**
+- **All existing workflows continue to work** without modification
+- **Distributed inference is disabled by default** (`enable_distributed=False`)
+- **No breaking changes** to existing functionality
+
+### **Enabling Distributed Inference**
+To enable distributed inference in existing workflows:
+1. **Set `enable_distributed=True`** in `LoadWanVideoModel`
+2. **Configure GPU count and options** as needed
+3. **Replace standard inference** with `WanVideoDistributedInference` node
+
+### **Migration Path**
+```
+Before (Standard):
+LoadWanVideoModel → WanVideoInference
+
+After (Distributed):
+LoadWanVideoModel (enable_distributed=True) → WanVideoDistributedInference
+```
 
 ## ⚙️ **Configuration Tips**
 
