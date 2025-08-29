@@ -1452,7 +1452,9 @@ class WanVideoModelLoader:
             except NotImplementedError as e:
                 if "meta tensor" in str(e).lower():
                     log.info("Model uses meta tensors, using to_empty()")
-                    patcher.model.diffusion_model = patcher.model.diffusion_model.to_empty(gpu_device)
+                    patcher.model.diffusion_model = patcher.model.diffusion_model.to_empty()
+                    # After to_empty(), move to the desired device
+                    patcher.model.diffusion_model = patcher.model.diffusion_model.to(gpu_device)
                 else:
                     raise e
             
