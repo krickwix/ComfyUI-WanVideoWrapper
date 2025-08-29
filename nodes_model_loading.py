@@ -1426,6 +1426,75 @@ class WanVideoModelLoader:
         patcher.model["use_fsdp"] = use_fsdp
         patcher.model["master_port"] = master_port
 
+        # Apply distributed model loading if enabled
+        if enable_distributed and gpu_count > 1:
+            log.info(f"Setting up distributed model loading with {gpu_count} GPUs")
+            
+            # Check available GPUs
+            available_gpus = torch.cuda.device_count()
+            if available_gpus < gpu_count:
+                log.warning(f"Requested {gpu_count} GPUs but only {available_gpus} are available. Using {available_gpus} GPUs.")
+                gpu_count = available_gpus
+                patcher.model["gpu_count"] = gpu_count
+            
+            # Set CUDA visible devices for multi-GPU
+            os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(str(i) for i in range(gpu_count))
+            
+            # Move model to GPU 0 first
+            device = torch.device("cuda:0")
+            patcher.model.diffusion_model = patcher.model.diffusion_model.to(device)
+            
+            log.info(f"Model moved to {device}")
+            log.info(f"Model device: {next(patcher.model.diffusion_model.parameters()).device}")
+            
+            # Distribute the model across GPUs
+            if gpu_count > 1:
+                if use_fsdp and hasattr(torch.distributed.fsdp, 'FullyShardedDataParallel'):
+                    try:
+                        # Use FSDP for model sharding
+                        import torch.distributed as dist
+                        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                        from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
+                        
+                        # Initialize distributed process group
+                        dist.init_process_group("nccl", rank=0, world_size=1)
+                        
+                        # Wrap model with FSDP
+                        patcher.model.diffusion_model = FSDP(
+                            patcher.model.diffusion_model,
+                            auto_wrap_policy=size_based_auto_wrap_policy,
+                            min_num_params=1000000,  # 1M parameters
+                            device_id=device
+                        )
+                        log.info("Model wrapped with FSDP for distributed inference")
+                        
+                    except Exception as e:
+                        log.warning(f"FSDP failed, falling back to DataParallel: {e}")
+                        # Fallback to DataParallel
+                        patcher.model.diffusion_model = torch.nn.DataParallel(
+                            patcher.model.diffusion_model, 
+                            device_ids=list(range(gpu_count))
+                        )
+                        log.info("Model wrapped with DataParallel for distributed inference")
+                else:
+                    # Use DataParallel for simpler multi-GPU distribution
+                    patcher.model.diffusion_model = torch.nn.DataParallel(
+                        patcher.model.diffusion_model, 
+                        device_ids=list(range(gpu_count))
+                    )
+                    log.info("Model wrapped with DataParallel for distributed inference")
+                
+                # Store the distributed model info
+                patcher.model["is_distributed"] = True
+                patcher.model["distributed_device_ids"] = list(range(gpu_count))
+                log.info(f"Model successfully distributed across {gpu_count} GPUs")
+            else:
+                patcher.model["is_distributed"] = False
+                log.info("Single GPU mode - no distribution applied")
+        else:
+            patcher.model["is_distributed"] = False
+            log.info("Distributed inference disabled - using single GPU")
+
         if 'transformer_options' not in patcher.model_options:
             patcher.model_options['transformer_options'] = {}
         patcher.model_options["transformer_options"]["block_swap_args"] = block_swap_args
