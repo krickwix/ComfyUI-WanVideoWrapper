@@ -1446,7 +1446,15 @@ class WanVideoModelLoader:
             
             # Move model to GPU 0 first
             gpu_device = torch.device("cuda:0")
-            patcher.model.diffusion_model = patcher.model.diffusion_model.to(gpu_device)
+            # Use to_empty() for meta tensors, to() for regular tensors
+            try:
+                patcher.model.diffusion_model = patcher.model.diffusion_model.to(gpu_device)
+            except NotImplementedError as e:
+                if "meta tensor" in str(e).lower():
+                    log.info("Model uses meta tensors, using to_empty()")
+                    patcher.model.diffusion_model = patcher.model.diffusion_model.to_empty(gpu_device)
+                else:
+                    raise e
             
             log.info(f"Model moved to {gpu_device}")
             log.info(f"Model device: {next(patcher.model.diffusion_model.parameters()).device}")
